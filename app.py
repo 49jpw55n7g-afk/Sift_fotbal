@@ -6,9 +6,8 @@ import requests
 
 st.set_page_config(page_title="Predictor Automatizat Superbet", page_icon="⚽", layout="wide")
 
-st.title("⚽ PREDICTOR BAZAT STRICT PE ULTIMELE MECIURI JUCATE")
+st.title("⚽ PREDICTOR ADVANCED - XG, PRIMUL 11 & FORMA JUCĂTORILOR")
 
-# Sidebar - Configurare API
 st.sidebar.header("⚙️ Conectare API")
 api_key = st.sidebar.text_input("Cheie API Football-Data.org", value="20505c2f8aaa48e58a6c4764d0664e7f", type="password")
 
@@ -24,90 +23,107 @@ def fetch_matches(api_key):
         return []
 
 @st.cache_data(ttl=3600)
-def get_pure_team_stats(team_id, api_key):
+def get_team_advanced_stats(team_id, api_key):
     """
-    Extrage STRICT cifrele din ultimele 8 meciuri oficiale jucate de echipă,
-    fără să ia în calcul dacă au fost acasă sau în deplasare.
+    Extrage evoluția generală (ultimelor 8 meciuri) 
+    și randamentul din ULTIMUL meci pentru a pondera primul 11.
     """
     url = f"https://api.football-data.org/v4/teams/{team_id}/matches?status=FINISHED&limit=8"
     try:
         res = requests.get(url, headers={"X-Auth-Token": api_key})
         if res.status_code == 200:
             data = res.json().get("matches", [])
-            goals_scored = 0
-            goals_conceded = 0
-            count = len(data)
+            if not data:
+                return 1.2, 1.2, 1.2, 1.2
             
-            if count == 0:
-                return 1.2, 1.2
-                
+            scored_list = []
+            conceded_list = []
+            
             for m in data:
                 is_home = (m['homeTeam']['id'] == team_id)
                 scored = m['score']['fullTime']['home'] if is_home else m['score']['fullTime']['away']
                 conceded = m['score']['fullTime']['away'] if is_home else m['score']['fullTime']['home']
-                
-                goals_scored += (scored or 0)
-                goals_conceded += (conceded or 0)
+                if scored is not None and conceded is not None:
+                    scored_list.append(scored)
+                    conceded_list.append(conceded)
             
-            avg_scored = goals_scored / count
-            avg_conceded = goals_conceded / count
+            # Media generală a ultimelor meciuri (Ponderea de 70%)
+            avg_scored = np.mean(scored_list) if scored_list else 1.2
+            avg_conceded = np.mean(conceded_list) if conceded_list else 1.2
             
-            return round(avg_scored, 2), round(avg_conceded, 2)
-        return 1.2, 1.2
+            # Randamentul specific din ULTIMUL meci jucat de Primul 11 (Ponderea de 30%)
+            last_match_scored = scored_list[-1] if scored_list else avg_scored
+            last_match_conceded = conceded_list[-1] if conceded_list else avg_conceded
+            
+            return round(avg_scored, 2), round(avg_conceded, 2), float(last_match_scored), float(last_match_conceded)
+        return 1.2, 1.2, 1.2, 1.2
     except:
-        return 1.2, 1.2
+        return 1.2, 1.2, 1.2, 1.2
 
 matches = fetch_matches(api_key)
 
 if matches:
     match_options = {f"{m['homeTeam']['name']} vs {m['awayTeam']['name']} ({m['competition']['name']})": m for m in matches}
-    
     if "selected_match_key" not in st.session_state:
         st.session_state.selected_match_key = list(match_options.keys())[0]
 
-    selected_match_name = st.selectbox(
-        "Alege Meciul Zilei", 
-        list(match_options.keys()), 
-        key="selected_match_key"
-    )
-    
+    selected_match_name = st.selectbox("Alege Meciul Zilei", list(match_options.keys()), key="selected_match_key")
     selected_match = match_options[selected_match_name]
     echipa_gazda = selected_match['homeTeam']['name']
     echipa_oaspete = selected_match['awayTeam']['name']
     
-    with st.spinner("Se extrag cifrele exacte din ultimele meciuri..."):
-        h_attack, h_defense = get_pure_team_stats(selected_match['homeTeam']['id'], api_key)
-        a_attack, a_defense = get_pure_team_stats(selected_match['awayTeam']['id'], api_key)
-        
-        # CALCUL STRICT PE CIFRE DATE
-        calculated_xg_home = round((h_attack + a_defense) / 2, 2)
-        calculated_xg_away = round((a_attack + h_defense) / 2, 2)
-        
-        odds_data = selected_match.get('odds', {})
-        cota_1 = odds_data.get('homeWin', None)
-        cota_x = odds_data.get('draw', None)
-        cota_2 = odds_data.get('awayWin', None)
-
+    with st.spinner("Se analizează forma generală și ultimul 11 titular..."):
+        h_avg_s, h_avg_c, h_last_s, h_last_c = get_team_advanced_stats(selected_match['homeTeam']['id'], api_key)
+        a_avg_s, a_avg_c, a_last_s, a_last_c = get_team_advanced_stats(selected_match['awayTeam']['id'], api_key)
 else:
-    st.info("Introduceți manual datele meciului.")
-    echipa_gazda = st.sidebar.text_input("Echipă Gazdă", "Arsenal")
-    echipa_oaspete = st.sidebar.text_input("Echipă Oaspete", "Chelsea")
-    calculated_xg_home, calculated_xg_away = 1.70, 1.10
-    cota_1, cota_x, cota_2 = None, None, None
+    echipa_gazda, echipa_oaspete = "Arsenal", "Chelsea"
+    h_avg_s, h_avg_c, h_last_s, h_last_c = 1.70, 1.10, 2.0, 1.0
+    a_avg_s, a_avg_c, a_last_s, a_last_c = 1.30, 1.40, 1.0, 2.0
 
-# Sidebar - Afișare Cifre Brute
-st.sidebar.subheader("📊 Date Brute Ultimele Meciuri")
-st.sidebar.caption(f"**{echipa_gazda}**: Medie {h_attack} marcate / {h_defense} primite")
-st.sidebar.caption(f"**{echipa_oaspete}**: Medie {a_attack} marcate / {a_defense} primite")
+# ---------------------------------------------------------
+# SIDEBAR - AJUSTARE PRIMUL 11 & FORMA
+# ---------------------------------------------------------
+st.sidebar.subheader(f"👥 Ultimul 11 & Rotire - {echipa_gazda}")
+lineup_weight_h = st.sidebar.slider(
+    f"Importanță Ultimul 11 ({echipa_gazda})",
+    min_value=0.0, max_value=0.5, value=0.30, step=0.05,
+    help="Cât de mult influențează ultimul 11 jucat. Standard = 0.30 (30%). Dacă primul 11 se schimbă radical, scade la 0.10."
+)
+forma_jucatori_h = st.sidebar.slider(
+    f"Formă / Individualități ({echipa_gazda})", 
+    min_value=0.70, max_value=1.30, value=1.00, step=0.05
+)
 
-exp_g_home = st.sidebar.number_input(f"xG Calculat {echipa_gazda}", value=float(calculated_xg_home), step=0.05, key=f"xg_h_{echipa_gazda}")
-exp_g_away = st.sidebar.number_input(f"xG Calculat {echipa_oaspete}", value=float(calculated_xg_away), step=0.05, key=f"xg_a_{echipa_oaspete}")
+st.sidebar.subheader(f"👥 Ultimul 11 & Rotire - {echipa_oaspete}")
+lineup_weight_a = st.sidebar.slider(
+    f"Importanță Ultimul 11 ({echipa_oaspete})",
+    min_value=0.0, max_value=0.5, value=0.30, step=0.05,
+    help="Cât de mult influențează ultimul 11 jucat. Standard = 0.30 (30%). Dacă primul 11 se schimbă radical, scade la 0.10."
+)
+forma_jucatori_a = st.sidebar.slider(
+    f"Formă / Individualități ({echipa_oaspete})", 
+    min_value=0.70, max_value=1.30, value=1.00, step=0.05
+)
 
-st.sidebar.subheader("💡 Corecție Manuală Cote Superbet")
+# CALCUL xG PONDERAT: 70% MEDIA MULTIANUALĂ / 30% ULTIMUL 11 + FACTOR FORMA
+h_attack_combined = ((1 - lineup_weight_h) * h_avg_s) + (lineup_weight_h * h_last_s)
+h_defense_combined = ((1 - lineup_weight_h) * h_avg_c) + (lineup_weight_h * h_last_c)
+
+a_attack_combined = ((1 - lineup_weight_a) * a_avg_s) + (lineup_weight_a * a_last_s)
+a_defense_combined = ((1 - lineup_weight_a) * a_avg_c) + (lineup_weight_a * a_last_c)
+
+base_xg_home = (h_attack_combined + a_defense_combined) / 2
+base_xg_away = (a_attack_combined + h_defense_combined) / 2
+
+exp_g_home = round(base_xg_home * forma_jucatori_h, 2)
+exp_g_away = round(base_xg_away * forma_jucatori_a, 2)
+
+st.sidebar.subheader("💡 Corecție Manuală Cote Superbet (Opțional)")
 manual_cota_1 = st.sidebar.number_input("Cotă 1", value=0.0, step=0.05)
 manual_cota_x = st.sidebar.number_input("Cotă X", value=0.0, step=0.05)
 manual_cota_2 = st.sidebar.number_input("Cotă 2", value=0.0, step=0.05)
 
+cota_1, cota_x, cota_2 = None, None, None
 if manual_cota_1 > 1.0 and manual_cota_x > 1.0 and manual_cota_2 > 1.0:
     cota_1, cota_x, cota_2 = manual_cota_1, manual_cota_x, manual_cota_2
 
@@ -116,7 +132,7 @@ medie_cartonase = st.sidebar.number_input("Medie Cartonașe / Meci", value=4.5, 
 medie_cornere = st.sidebar.number_input("Medie Cornere / Meci", value=9.5, step=0.5, key="corn")
 
 # ---------------------------------------------------------
-# CALCUL MATEMATIC STRICT (POISSON PURE)
+# CALCUL MATRICE POISSON
 # ---------------------------------------------------------
 max_goals = 6
 
@@ -133,15 +149,14 @@ p1_raw = float(np.sum(np.tril(mat_full, -1)) * 100)
 px_raw = float(np.sum(np.diag(mat_full)) * 100)
 p2_raw = float(np.sum(np.triu(mat_full, 1)) * 100)
 
-# Ponderea datelor matematice este de 90%, iar piața influențează doar 10%
-if cota_1 and cota_x and cota_2 and cota_1 > 1.0 and cota_x > 1.0 and cota_2 > 1.0:
+if cota_1 and cota_x and cota_2:
     margin = (1/cota_1) + (1/cota_x) + (1/cota_2)
     p1_market = (1 / cota_1 / margin) * 100
     px_market = (1 / cota_x / margin) * 100
     p2_market = (1 / cota_2 / margin) * 100
-    p1 = (p1_raw * 0.90) + (p1_market * 0.10)
-    px = (px_raw * 0.90) + (px_market * 0.10)
-    p2 = (p2_raw * 0.90) + (p2_market * 0.10)
+    p1 = (p1_raw * 0.85) + (p1_market * 0.15)
+    px = (px_raw * 0.85) + (px_market * 0.15)
+    p2 = (p2_raw * 0.85) + (p2_market * 0.15)
 else:
     p1, px, p2 = p1_raw, px_raw, p2_raw
 
@@ -199,13 +214,18 @@ for tip_pariu, prob in toate_pariurile.items():
         candidate_value_bets.append((tip_pariu, prob, cota_estimata, score))
 
 candidate_value_bets.sort(key=lambda x: x[3], reverse=True)
-
 best_value_bet = candidate_value_bets[0] if candidate_value_bets else (pariuri_sortate[0][0], pariuri_sortate[0][1], round(100/pariuri_sortate[0][1], 2), 0)
 
 # ---------------------------------------------------------
-# INTERFAȚĂ
+# AFISARE REZULTATE
 # ---------------------------------------------------------
 st.subheader(f"🏟️ {echipa_gazda} vs {echipa_oaspete}")
+
+st.info(
+    f"📊 **Calcul Balansat (Media echipei vs. Ultimul 11):**\n\n"
+    f"• **{echipa_gazda}**: xG Final **{exp_g_home}** (Media ultimelor meciuri: {h_avg_s} goluri | Randament ultimul 11: {h_last_s} goluri)\n\n"
+    f"• **{echipa_oaspete}**: xG Final **{exp_g_away}** (Media ultimelor meciuri: {a_avg_s} goluri | Randament ultimul 11: {a_last_s} goluri)"
+)
 
 tab_top, tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🏆 Top Șanse (Pariul Zilei)",
@@ -227,7 +247,7 @@ with tab_top:
     )
 
     st.markdown("---")
-    st.markdown("### 🔥 Top Cele mai sigure opțiuni (Șanse maxime de reușită)")
+    st.markdown("### 🔥 Top Cele mai sigure opțiuni")
     
     col_a, col_b, col_c = st.columns(3)
     pariul_1, prob_1 = pariuri_sortate[0]
