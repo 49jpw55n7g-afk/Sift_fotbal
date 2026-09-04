@@ -4,7 +4,7 @@ import numpy as np
 from scipy.stats import poisson
 import requests
 
-st.set_page_config(page_title="Predictor Automizat Superbet", page_icon="⚽", layout="wide")
+st.set_page_config(page_title="Predictor Automatizat Superbet", page_icon="⚽", layout="wide")
 
 st.title("⚽ PREDICTOR AUTOMATIZAT - XG RECENT & VALUE BETS")
 
@@ -25,7 +25,7 @@ def fetch_matches(api_key):
 
 @st.cache_data(ttl=3600)
 def get_team_stats(team_id, api_key):
-    url = f"https://api.football-data.org/v4/teams/{team_id}/matches?status=FINISHED&limit=5"
+    url = f"https://api.football-data.org/v4/teams/{team_id}/matches?status=FINISHED&limit=6"
     try:
         res = requests.get(url, headers={"X-Auth-Token": api_key})
         if res.status_code == 200:
@@ -34,7 +34,7 @@ def get_team_stats(team_id, api_key):
             goals_conceded = 0
             count = len(data)
             if count == 0:
-                return 1.3, 1.3
+                return 1.3, 1.2
             for m in data:
                 if m['homeTeam']['id'] == team_id:
                     goals_scored += m['score']['fullTime']['home'] or 0
@@ -43,12 +43,12 @@ def get_team_stats(team_id, api_key):
                     goals_scored += m['score']['fullTime']['away'] or 0
                     goals_conceded += m['score']['fullTime']['home'] or 0
             
-            avg_scored = min(max(goals_scored / count, 0.5), 2.5)
-            avg_conceded = min(max(goals_conceded / count, 0.5), 2.5)
+            avg_scored = min(max(goals_scored / count, 0.4), 2.6)
+            avg_conceded = min(max(goals_conceded / count, 0.4), 2.6)
             return round(avg_scored, 2), round(avg_conceded, 2)
-        return 1.3, 1.3
+        return 1.3, 1.2
     except:
-        return 1.3, 1.3
+        return 1.3, 1.2
 
 matches = fetch_matches(api_key)
 
@@ -72,8 +72,9 @@ if matches:
         h_attack, h_defense = get_team_stats(selected_match['homeTeam']['id'], api_key)
         a_attack, a_defense = get_team_stats(selected_match['awayTeam']['id'], api_key)
         
-        calculated_xg_home = round((h_attack + a_defense) / 2, 2)
-        calculated_xg_away = round((a_attack + h_defense) / 2, 2)
+        # Aplicăm un avantaj de teren propriu (Home Advantage factor: +15% gazde, -10% oaspeți)
+        calculated_xg_home = round(((h_attack + a_defense) / 2) * 1.15, 2)
+        calculated_xg_away = round(((a_attack + h_defense) / 2) * 0.90, 2)
         
         odds_data = selected_match.get('odds', {})
         cota_1 = odds_data.get('homeWin', None)
@@ -84,13 +85,13 @@ else:
     st.info("Introduceți manual datele meciului.")
     echipa_gazda = st.sidebar.text_input("Echipă Gazdă", "Arsenal")
     echipa_oaspete = st.sidebar.text_input("Echipă Oaspete", "Chelsea")
-    calculated_xg_home, calculated_xg_away = 1.70, 1.20
+    calculated_xg_home, calculated_xg_away = 1.70, 1.10
     cota_1, cota_x, cota_2 = None, None, None
 
 # Sidebar - Parametri
 st.sidebar.subheader("📊 Parametri Calculați Automat")
-exp_g_home = st.sidebar.number_input("xG Gazdă (Formă Recentă)", value=float(calculated_xg_home), step=0.1, key=f"xg_h_{echipa_gazda}")
-exp_g_away = st.sidebar.number_input("xG Oaspete (Formă Recentă)", value=float(calculated_xg_away), step=0.1, key=f"xg_a_{echipa_oaspete}")
+exp_g_home = st.sidebar.number_input("xG Gazdă (Formă + Teren Propriul)", value=float(calculated_xg_home), step=0.1, key=f"xg_h_{echipa_gazda}")
+exp_g_away = st.sidebar.number_input("xG Oaspete (Formă + Deplasare)", value=float(calculated_xg_away), step=0.1, key=f"xg_a_{echipa_oaspete}")
 
 st.sidebar.subheader("🟨 Cartonașe & 🚩 Cornere")
 medie_cartonase = st.sidebar.number_input("Medie Cartonașe / Meci", value=4.5, step=0.5, key="cart")
@@ -114,12 +115,15 @@ p1_raw = float(np.sum(np.tril(mat_full, -1)) * 100)
 px_raw = float(np.sum(np.diag(mat_full)) * 100)
 p2_raw = float(np.sum(np.triu(mat_full, 1)) * 100)
 
+# Ponderea pieței: 80% cotele reale, 20% modelul xG
 if cota_1 and cota_x and cota_2:
     margin = (1/cota_1) + (1/cota_x) + (1/cota_2)
     p1_market = (1 / cota_1 / margin) * 100
     px_market = (1 / cota_x / margin) * 100
     p2_market = (1 / cota_2 / margin) * 100
-    p1, px, p2 = (p1_raw + p1_market) / 2, (px_raw + px_market) / 2, (p2_raw + p2_market) / 2
+    p1 = (p1_raw * 0.20) + (p1_market * 0.80)
+    px = (px_raw * 0.20) + (px_market * 0.80)
+    p2 = (p2_raw * 0.20) + (p2_market * 0.80)
 else:
     p1, px, p2 = p1_raw, px_raw, p2_raw
 
@@ -169,7 +173,7 @@ toate_pariurile = {
 
 pariuri_sortate = sorted(toate_pariurile.items(), key=lambda x: x[1], reverse=True)
 
-# Selecție Value Bet
+# Value Bet: Căutăm opțiunea cu șansă bună (52% - 75%) dar cu cotă atractivă
 candidate_value_bets = []
 for tip_pariu, prob in toate_pariurile.items():
     if 52.0 <= prob <= 75.0:
@@ -182,7 +186,7 @@ candidate_value_bets.sort(key=lambda x: x[3], reverse=True)
 best_value_bet = candidate_value_bets[0] if candidate_value_bets else (pariuri_sortate[0][0], pariuri_sortate[0][1], round(100/pariuri_sortate[0][1], 2), 0)
 
 # ---------------------------------------------------------
-# INTERFAȚĂ
+# INTERFAȚĂ PE TAB-URI
 # ---------------------------------------------------------
 st.subheader(f"🏟️ {echipa_gazda} vs {echipa_oaspete}")
 
@@ -223,7 +227,6 @@ with tab_top:
     st.markdown("---")
     st.markdown("#### 📋 Clasament Complet cu Cote Estimate:")
     
-    # Generare corectată pentru DataFrame
     l_pariuri = []
     for item_nume, item_prob in pariuri_sortate:
         cota_c = 100 / item_prob if item_prob > 0 else 0
@@ -236,20 +239,9 @@ with tab1:
     col1, col2 = st.columns(2)
     with col1:
         st.markdown("### 1X2 Rezultat Final")
-        # Dacă există cote reale de la casele de pariuri, le dăm pondere majoritară (80%) 
-# pentru a evita anomalii de tipul "Köln favorită la Stuttgart"
-if cota_1 and cota_x and cota_2:
-    margin = (1/cota_1) + (1/cota_x) + (1/cota_2)
-    p1_market = (1 / cota_1 / margin) * 100
-    px_market = (1 / cota_x / margin) * 100
-    p2_market = (1 / cota_2 / margin) * 100
-    
-    # Model hibrid: 80% Piață (Cote Reale) + 20% Poisson (xG Recent)
-    p1 = (p1_raw * 0.20) + (p1_market * 0.80)
-    px = (px_raw * 0.20) + (px_market * 0.80)
-    p2 = (p2_raw * 0.20) + (p2_market * 0.80)
-else:
-    p1, px, p2 = p1_raw, px_raw, p2_raw
+        st.write(f"• **1 (Victorie {echipa_gazda}):** {p1:.1f}% (Cotă ~{100/p1 if p1>0 else 0:.2f})")
+        st.write(f"• **X (Egal):** {px:.1f}% (Cotă ~{100/px if px>0 else 0:.2f})")
+        st.write(f"• **2 (Victorie {echipa_oaspete}):** {p2:.1f}% (Cotă ~{100/p2 if p2>0 else 0:.2f})")
         st.markdown("---")
         st.markdown("### Șansă Dublă")
         st.write(f"• **1X:** {p1+px:.1f}%")
