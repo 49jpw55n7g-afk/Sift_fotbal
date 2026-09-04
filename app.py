@@ -11,7 +11,7 @@ st.markdown("Preluare automată a meciurilor zilei și calcul instant pentru Val
 
 # Sidebar - Configurare API & Sursă Date
 st.sidebar.header("⚙️ Conectare & Setări")
-api_key = st.sidebar.text_input("Cheie API Football-Data.org (Opțional)", type="password")
+api_key = st.sidebar.text_input("Cheie API Football-Data.org", value="20505c2f8aaa48e58a6c4764d0664e7f", type="password")
 
 sursa = st.sidebar.radio("Sursă Date", ["API Automat (Meciurile Zilei)", "Introducere Manuală / Custom"])
 
