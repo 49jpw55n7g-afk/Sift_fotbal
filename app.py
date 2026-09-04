@@ -25,7 +25,7 @@ def fetch_matches(api_key):
 
 @st.cache_data(ttl=3600)
 def get_team_stats(team_id, api_key):
-    url = f"https://api.football-data.org/v4/teams/{team_id}/matches?status=FINISHED&limit=6"
+    url = f"https://api.football-data.org/v4/teams/{team_id}/matches?status=FINISHED&limit=5"
     try:
         res = requests.get(url, headers={"X-Auth-Token": api_key})
         if res.status_code == 200:
@@ -34,7 +34,7 @@ def get_team_stats(team_id, api_key):
             goals_conceded = 0
             count = len(data)
             if count == 0:
-                return 1.4, 1.2
+                return 1.3, 1.3
             for m in data:
                 if m['homeTeam']['id'] == team_id:
                     goals_scored += m['score']['fullTime']['home'] or 0
@@ -42,10 +42,13 @@ def get_team_stats(team_id, api_key):
                 else:
                     goals_scored += m['score']['fullTime']['away'] or 0
                     goals_conceded += m['score']['fullTime']['home'] or 0
-            return round(goals_scored / count, 2), round(goals_conceded / count, 2)
-        return 1.4, 1.2
+            
+            avg_scored = min(max(goals_scored / count, 0.5), 2.5)
+            avg_conceded = min(max(goals_conceded / count, 0.5), 2.5)
+            return round(avg_scored, 2), round(avg_conceded, 2)
+        return 1.3, 1.3
     except:
-        return 1.4, 1.2
+        return 1.3, 1.3
 
 matches = fetch_matches(api_key)
 
@@ -166,15 +169,11 @@ toate_pariurile = {
 
 pariuri_sortate = sorted(toate_pariurile.items(), key=lambda x: x[1], reverse=True)
 
-# ---------------------------------------------------------
-# ALGORITM SELECȚIE VALUE BET (COTA MAI MARE + ȘANȘĂ MARE)
-# ---------------------------------------------------------
-# Căutăm opțiuni care au probabilitate de minim 55%, dar au cota estimată cât mai mare (reducem pragul de "siguranță orbească")
+# Selecție Value Bet
 candidate_value_bets = []
 for tip_pariu, prob in toate_pariurile.items():
-    if 52.0 <= prob <= 75.0:  # Plaja ideală pentru cote mari dar realizabile (Cote de ~1.40 - 1.95)
-        cota_estimata = round(100 / prob, 2)
-        # Scor de valoare: echilibru între cotă și șansa reală
+    if 52.0 <= prob <= 75.0:
+        cota_estimata = round(100 / prob, 2) if prob > 0 else 0
         score = prob * cota_estimata
         candidate_value_bets.append((tip_pariu, prob, cota_estimata, score))
 
@@ -183,7 +182,7 @@ candidate_value_bets.sort(key=lambda x: x[3], reverse=True)
 best_value_bet = candidate_value_bets[0] if candidate_value_bets else (pariuri_sortate[0][0], pariuri_sortate[0][1], round(100/pariuri_sortate[0][1], 2), 0)
 
 # ---------------------------------------------------------
-# INTERFAȚĂ PE TAB-URI
+# INTERFAȚĂ
 # ---------------------------------------------------------
 st.subheader(f"🏟️ {echipa_gazda} vs {echipa_oaspete}")
 
@@ -224,10 +223,13 @@ with tab_top:
     st.markdown("---")
     st.markdown("#### 📋 Clasament Complet cu Cote Estimate:")
     
-    df_pariuri = pd.DataFrame(
-        [(item[0], f"{item[1]:.1f}%", f"{100/item[1]:.2f}") for item[0], item[1] in pariuri_sortate],
-        columns=["Tip Pariu", "Probabilitate Matematică (%)", "Cotă Estimată Fair"]
-    )
+    # Generare corectată pentru DataFrame
+    l_pariuri = []
+    for item_nume, item_prob in pariuri_sortate:
+        cota_c = 100 / item_prob if item_prob > 0 else 0
+        l_pariuri.append((item_nume, f"{item_prob:.1f}%", f"{cota_c:.2f}"))
+
+    df_pariuri = pd.DataFrame(l_pariuri, columns=["Tip Pariu", "Probabilitate Matematică (%)", "Cotă Estimată Fair"])
     st.dataframe(df_pariuri, use_container_width=True)
 
 with tab1:
