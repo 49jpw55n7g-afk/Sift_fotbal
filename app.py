@@ -4,32 +4,57 @@ import numpy as np
 from scipy.stats import poisson
 import requests
 
-st.set_page_config(page_title="Predictor Complete Superbet", page_icon="⚽", layout="wide")
+st.set_page_config(page_title="Predictor Automizat Superbet", page_icon="⚽", layout="wide")
 
-st.title("⚽ PREDICTOR COMPLET - TOATE PIEȚELE SUPERBET")
+st.title("⚽ PREDICTOR AUTOMATIZAT - XG RECENT & COTE REALE")
 
-# Sidebar - Configurare & Conectare
-st.sidebar.header("⚙️ Setări Meci")
+# Sidebar - Configurare API
+st.sidebar.header("⚙️ Conectare API")
 api_key = st.sidebar.text_input("Cheie API Football-Data.org", value="20505c2f8aaa48e58a6c4764d0664e7f", type="password")
+
+headers = {"X-Auth-Token": api_key}
 
 @st.cache_data(ttl=3600)
 def fetch_matches(api_key):
     url = "https://api.football-data.org/v4/matches"
-    headers = {"X-Auth-Token": api_key}
     try:
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers={"X-Auth-Token": api_key})
         if response.status_code == 200:
             return response.json().get("matches", [])
         return []
     except:
         return []
 
+@st.cache_data(ttl=3600)
+def get_team_stats(team_id, api_key):
+    """Calculează xG (media de goluri marcate/primite) din ultimele meciuri"""
+    url = f"https://api.football-data.org/v4/teams/{team_id}/matches?status=FINISHED&limit=6"
+    try:
+        res = requests.get(url, headers={"X-Auth-Token": api_key})
+        if res.status_code == 200:
+            data = res.json().get("matches", [])
+            goals_scored = 0
+            goals_conceded = 0
+            count = len(data)
+            if count == 0:
+                return 1.4, 1.2
+            for m in data:
+                if m['homeTeam']['id'] == team_id:
+                    goals_scored += m['score']['fullTime']['home'] or 0
+                    goals_conceded += m['score']['fullTime']['away'] or 0
+                else:
+                    goals_scored += m['score']['fullTime']['away'] or 0
+                    goals_conceded += m['score']['fullTime']['home'] or 0
+            return round(goals_scored / count, 2), round(goals_conceded / count, 2)
+        return 1.4, 1.2
+    except:
+        return 1.4, 1.2
+
 matches = fetch_matches(api_key)
 
 if matches:
     match_options = {f"{m['homeTeam']['name']} vs {m['awayTeam']['name']} ({m['competition']['name']})": m for m in matches}
     
-    # Salvarea opțiunii selectate în session_state pentru a preveni săritul la primul meci
     if "selected_match_key" not in st.session_state:
         st.session_state.selected_match_key = list(match_options.keys())[0]
 
@@ -42,26 +67,44 @@ if matches:
     selected_match = match_options[selected_match_name]
     echipa_gazda = selected_match['homeTeam']['name']
     echipa_oaspete = selected_match['awayTeam']['name']
+    
+    # Calcul xG din istoricul recent direct prin API
+    with st.spinner("Se analizează ultimele meciuri ale echipelor..."):
+        h_attack, h_defense = get_team_stats(selected_match['homeTeam']['id'], api_key)
+        a_attack, a_defense = get_team_stats(selected_match['awayTeam']['id'], api_key)
+        
+        # xG Estimat = Forma de atac propriu ponderată cu defensiva adversarului
+        calculated_xg_home = round((h_attack + a_defense) / 2, 2)
+        calculated_xg_away = round((a_attack + h_defense) / 2, 2)
+        
+        # Extragere cota din API dacă există
+        odds_data = selected_match.get('odds', {})
+        cota_1 = odds_data.get('homeWin', None)
+        cota_x = odds_data.get('draw', None)
+        cota_2 = odds_data.get('awayWin', None)
+
 else:
-    st.info("Folosiți introducerea manuală dacă meciurile nu se încarcă automat.")
+    st.info("Introduceți manual datele meciului.")
     echipa_gazda = st.sidebar.text_input("Echipă Gazdă", "Arsenal")
     echipa_oaspete = st.sidebar.text_input("Echipă Oaspete", "Chelsea")
+    calculated_xg_home, calculated_xg_away = 1.70, 1.20
+    cota_1, cota_x, cota_2 = None, None, None
 
-# Parametri Introduși (Modificarea lor nu va mai reseta meciul)
-st.sidebar.subheader("📊 Media de Goluri / xG")
-exp_g_home = st.sidebar.number_input("xG Gazdă", value=1.70, step=0.1, key="xg_h")
-exp_g_away = st.sidebar.number_input("xG Oaspete", value=1.20, step=0.1, key="xg_a")
+# Sidebar - Ajustări Meci
+st.sidebar.subheader("📊 Parametri Calculați Automat")
+st.sidebar.caption("Valorile de mai jos sunt extrase automat din ultimele meciuri:")
+
+exp_g_home = st.sidebar.number_input("xG Gazdă (Formă Recentă)", value=float(calculated_xg_home), step=0.1, key=f"xg_h_{echipa_gazda}")
+exp_g_away = st.sidebar.number_input("xG Oaspete (Formă Recentă)", value=float(calculated_xg_away), step=0.1, key=f"xg_a_{echipa_oaspete}")
 
 st.sidebar.subheader("🟨 Cartonașe & 🚩 Cornere")
 medie_cartonase = st.sidebar.number_input("Medie Cartonașe / Meci", value=4.5, step=0.5, key="cart")
 medie_cornere = st.sidebar.number_input("Medie Cornere / Meci", value=9.5, step=0.5, key="corn")
 
 # ---------------------------------------------------------
-# CALCUL MATEMATIC COMPLET
+# CALCUL MATEMATIC & CORECTARE CU COTELE PIEȚEI
 # ---------------------------------------------------------
 max_goals = 6
-
-exp_r1_h, exp_r1_a = exp_g_home * 0.43, exp_g_away * 0.43
 
 def build_poisson_matrix(exp_h, exp_a):
     mat = np.zeros((max_goals, max_goals))
@@ -71,14 +114,28 @@ def build_poisson_matrix(exp_h, exp_a):
     return mat
 
 mat_full = build_poisson_matrix(exp_g_home, exp_g_away)
+
+# Calcul Probabilități Pure din Poisson
+p1_raw = float(np.sum(np.tril(mat_full, -1)) * 100)
+px_raw = float(np.sum(np.diag(mat_full)) * 100)
+p2_raw = float(np.sum(np.triu(mat_full, 1)) * 100)
+
+# Dacă avem cote reale de la API, le combinăm cu modelul matematic (50% Piață / 50% Statistica Recentă)
+if cota_1 and cota_x and cota_2:
+    margin = (1/cota_1) + (1/cota_x) + (1/cota_2)
+    p1_market = (1 / cota_1 / margin) * 100
+    px_market = (1 / cota_x / margin) * 100
+    p2_market = (1 / cota_2 / margin) * 100
+    
+    p1 = (p1_raw + p1_market) / 2
+    px = (px_raw + px_market) / 2
+    p2 = (p2_raw + p2_market) / 2
+else:
+    p1, px, p2 = p1_raw, px_raw, p2_raw
+
+# Repriza 1 Poisson
+exp_r1_h, exp_r1_a = exp_g_home * 0.43, exp_g_away * 0.43
 mat_r1 = build_poisson_matrix(exp_r1_h, exp_r1_a)
-
-# Probabilități Final 1X2
-p1 = float(np.sum(np.tril(mat_full, -1)) * 100)
-px = float(np.sum(np.diag(mat_full)) * 100)
-p2 = float(np.sum(np.triu(mat_full, 1)) * 100)
-
-# Probabilități Repriza 1
 p1_r1 = float(np.sum(np.tril(mat_r1, -1)) * 100)
 px_r1 = float(np.sum(np.diag(mat_r1)) * 100)
 p2_r1 = float(np.sum(np.triu(mat_r1, 1)) * 100)
@@ -93,10 +150,7 @@ p_under15 = float(np.sum([mat_full[i, j] for i in range(2) for j in range(2) if 
 p_under25 = float(np.sum([mat_full[i, j] for i in range(3) for j in range(3) if i + j < 3]) * 100)
 p_under35 = float(np.sum([mat_full[i, j] for i in range(4) for j in range(4) if i + j < 4]) * 100)
 
-p_over15 = 100 - p_under15
-p_over25 = 100 - p_under25
-p_over35 = 100 - p_under35
-
+p_over15, p_over25, p_over35 = 100 - p_under15, 100 - p_under25, 100 - p_under35
 p_gg = float((1 - (np.sum(mat_full[0, :]) + np.sum(mat_full[:, 0]) - mat_full[0,0])) * 100)
 p_gg_r1 = float((1 - (np.sum(mat_r1[0, :]) + np.sum(mat_r1[:, 0]) - mat_r1[0,0])) * 100)
 
@@ -109,7 +163,6 @@ p_cart_over45 = (1 - poisson.cdf(4, medie_cartonase)) * 100
 p_corn_over85 = (1 - poisson.cdf(8, medie_cornere)) * 100
 p_corn_over95 = (1 - poisson.cdf(9, medie_cornere)) * 100
 
-# Centralizare pariuri
 toate_pariurile = {
     f"Șansă Dublă: 1X ({echipa_gazda} sau Egal)": p1 + px,
     f"Șansă Dublă: X2 (Egal sau {echipa_oaspete})": px + p2,
@@ -152,7 +205,6 @@ with tab_top:
     st.write("Iată pariurile cu cea mai mare probabilitate matematică pentru acest meci:")
     
     col_a, col_b, col_c = st.columns(3)
-    
     pariul_1, prob_1 = pariuri_sortate[0]
     pariul_2, prob_2 = pariuri_sortate[1]
     pariul_3, prob_3 = pariuri_sortate[2]
