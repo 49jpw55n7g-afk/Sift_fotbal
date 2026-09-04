@@ -236,9 +236,20 @@ with tab1:
     col1, col2 = st.columns(2)
     with col1:
         st.markdown("### 1X2 Rezultat Final")
-        st.write(f"• **1 (Victorie {echipa_gazda}):** {p1:.1f}% (Cotă ~{100/p1 if p1>0 else 0:.2f})")
-        st.write(f"• **X (Egal):** {px:.1f}% (Cotă ~{100/px if px>0 else 0:.2f})")
-        st.write(f"• **2 (Victorie {echipa_oaspete}):** {p2:.1f}% (Cotă ~{100/p2 if p2>0 else 0:.2f})")
+        # Dacă există cote reale de la casele de pariuri, le dăm pondere majoritară (80%) 
+# pentru a evita anomalii de tipul "Köln favorită la Stuttgart"
+if cota_1 and cota_x and cota_2:
+    margin = (1/cota_1) + (1/cota_x) + (1/cota_2)
+    p1_market = (1 / cota_1 / margin) * 100
+    px_market = (1 / cota_x / margin) * 100
+    p2_market = (1 / cota_2 / margin) * 100
+    
+    # Model hibrid: 80% Piață (Cote Reale) + 20% Poisson (xG Recent)
+    p1 = (p1_raw * 0.20) + (p1_market * 0.80)
+    px = (px_raw * 0.20) + (px_market * 0.80)
+    p2 = (p2_raw * 0.20) + (p2_market * 0.80)
+else:
+    p1, px, p2 = p1_raw, px_raw, p2_raw
         st.markdown("---")
         st.markdown("### Șansă Dublă")
         st.write(f"• **1X:** {p1+px:.1f}%")
