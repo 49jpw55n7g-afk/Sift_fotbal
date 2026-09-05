@@ -131,16 +131,23 @@ def filtreaza_piata_cartonase(tip_pariu: str, linie: float, cart_gazde: float, c
     return False, "Tip pariu invalid"
 
 # =============================================================================
-# EXTRAGERE DATE API
+# EXTRAGERE DATE API (MODIFICAT PENTRU A EXCLUDE MECIURILE FINALIATE)
 # =============================================================================
 
 @st.cache_data(ttl=3600)
 def fetch_matches(api_key):
-    url = "https://api.football-data.org/v4/matches"
+    # Preluăm doar meciurile programate (SCHEDULED, TIMED)
+    url = "https://api.football-data.org/v4/matches?status=SCHEDULED,TIMED"
     try:
         response = requests.get(url, headers={"X-Auth-Token": api_key})
         if response.status_code == 200:
-            return response.json().get("matches", [])
+            raw_matches = response.json().get("matches", [])
+            # Filtrare suplimentară pe status pentru siguranță
+            filtered_matches = [
+                m for m in raw_matches 
+                if m.get('status') in ['SCHEDULED', 'TIMED']
+            ]
+            return filtered_matches
         return []
     except:
         return []
@@ -180,7 +187,7 @@ matches = fetch_matches(api_key)
 
 if matches:
     match_options = {f"{m['homeTeam']['name']} vs {m['awayTeam']['name']} ({m['competition']['name']})": m for m in matches}
-    if "selected_match_key" not in st.session_state:
+    if "selected_match_key" not in st.session_state or st.session_state.selected_match_key not in match_options:
         st.session_state.selected_match_key = list(match_options.keys())[0]
 
     selected_match_name = st.selectbox("Alege Meciul de Analizat", list(match_options.keys()), key="selected_match_key")
@@ -192,6 +199,7 @@ if matches:
         h_avg_s, h_avg_c, h_recent_goals = get_team_advanced_stats(selected_match['homeTeam']['id'], api_key)
         a_avg_s, a_avg_c, a_recent_goals = get_team_advanced_stats(selected_match['awayTeam']['id'], api_key)
 else:
+    st.info("Nu s-au găsit meciuri viitoare programate în API-ul curent.")
     echipa_gazda, echipa_oaspete = "Genoa", "Como"
     h_avg_s, h_avg_c, h_recent_goals = 1.10, 1.40, [1, 2, 1, 0, 2]
     a_avg_s, a_avg_c, a_recent_goals = 1.30, 1.20, [2, 1, 3, 1, 1]
