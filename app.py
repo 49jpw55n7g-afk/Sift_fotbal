@@ -272,7 +272,7 @@ st.divider()
 tab_builder, tab_toate, tab_debug = st.tabs(["⚡ Bet Builder Meci (~2.00)", "📋 Toate Selecțiile Aprobate", "🛡️ Detalii Filtre & Volatilitate"])
 
 with tab_builder:
-    st.markdown(### 🎯 Bet Builder Dedicat: {echipa_gazda} vs {echipa_oaspete})
+    st.markdown(f"### 🎯 Bet Builder Dedicat: {echipa_gazda} vs {echipa_oaspete}")
     if len(aprobate_sortate) >= 2:
         c1 = 100 / aprobate_sortate[0][1]
         c2 = 100 / aprobate_sortate[1][1]
