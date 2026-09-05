@@ -131,23 +131,17 @@ def filtreaza_piata_cartonase(tip_pariu: str, linie: float, cart_gazde: float, c
     return False, "Tip pariu invalid"
 
 # =============================================================================
-# EXTRAGERE DATE API (MODIFICAT PENTRU A EXCLUDE MECIURILE FINALIATE)
+# EXTRAGERE DATE API & CALCUL PROBABILITĂȚI MULTI-MECI
 # =============================================================================
 
 @st.cache_data(ttl=3600)
 def fetch_matches(api_key):
-    # Preluăm doar meciurile programate (SCHEDULED, TIMED)
     url = "https://api.football-data.org/v4/matches?status=SCHEDULED,TIMED"
     try:
         response = requests.get(url, headers={"X-Auth-Token": api_key})
         if response.status_code == 200:
             raw_matches = response.json().get("matches", [])
-            # Filtrare suplimentară pe status pentru siguranță
-            filtered_matches = [
-                m for m in raw_matches 
-                if m.get('status') in ['SCHEDULED', 'TIMED']
-            ]
-            return filtered_matches
+            return [m for m in raw_matches if m.get('status') in ['SCHEDULED', 'TIMED']]
         return []
     except:
         return []
@@ -179,87 +173,97 @@ def get_team_advanced_stats(team_id, api_key):
     except:
         return 1.2, 1.2, [1, 2, 1, 2, 1]
 
+def analizeaza_meci(m, api_key, coef_arbitru, medie_cornere_meci):
+    echipa_gazda = m['homeTeam']['name']
+    echipa_oaspete = m['awayTeam']['name']
+    meci_nume = f"{echipa_gazda} vs {echipa_oaspete}"
+
+    h_avg_s, h_avg_c, h_recent_goals = get_team_advanced_stats(m['homeTeam']['id'], api_key)
+    a_avg_s, a_avg_c, a_recent_goals = get_team_advanced_stats(m['awayTeam']['id'], api_key)
+
+    cart_gazde, cart_oaspeti = 2.1, 1.9
+    istoric_cornere = [10, 8, 11, 9, 12]
+
+    exp_g_home = round((h_avg_s + a_avg_c) / 2, 2)
+    exp_g_away = round((a_avg_s + h_avg_c) / 2, 2)
+
+    max_goals = 6
+    mat_full = np.zeros((max_goals, max_goals))
+    for i in range(max_goals):
+        for j in range(max_goals):
+            mat_full[i, j] = poisson.pmf(i, exp_g_home) * poisson.pmf(j, exp_g_away)
+
+    p_under35 = float(np.sum([mat_full[i, j] for i in range(4) for j in range(4) if i + j < 4]) * 100)
+    p_over25 = 100 - float(np.sum([mat_full[i, j] for i in range(3) for j in range(3) if i + j < 3]) * 100)
+
+    # Evaluări Piețe
+    eval_u35, msg_u35 = filtreaza_piata_goluri('SUB', 3.5, exp_g_home, exp_g_away, h_recent_goals, a_recent_goals)
+    eval_o25, msg_o25 = filtreaza_piata_goluri('PESTE', 2.5, exp_g_home, exp_g_away, h_recent_goals, a_recent_goals)
+
+    medie_cartonase_ajustata = (cart_gazde + cart_oaspeti) * coef_arbitru
+    p_corn_over85 = (1 - poisson.cdf(8, medie_cornere_meci)) * 100
+    p_cart_over35 = (1 - poisson.cdf(3, medie_cartonase_ajustata)) * 100
+    p_cart_over25 = (1 - poisson.cdf(2, medie_cartonase_ajustata)) * 100
+
+    eval_corn, msg_corn = filtreaza_piata_cornere('PESTE', 8.5, medie_cornere_meci, istoric_cornere)
+    eval_cart35, msg_cart35 = filtreaza_piata_cartonase('PESTE', 3.5, cart_gazde, cart_oaspeti, coef_arbitru)
+    eval_cart25, msg_cart25 = filtreaza_piata_cartonase('PESTE', 2.5, cart_gazde, cart_oaspeti, coef_arbitru)
+
+    optiuni = [
+        (meci_nume, "Goluri: Sub 3.5", p_under35, eval_u35, msg_u35),
+        (meci_nume, "Goluri: Peste 2.5", p_over25, eval_o25, msg_o25),
+        (meci_nume, "Cornere: Peste 8.5", p_corn_over85, eval_corn, msg_corn),
+        (meci_nume, "Cartonașe: Peste 3.5", p_cart_over35, eval_cart35, msg_cart35),
+        (meci_nume, "Cartonașe: Peste 2.5", p_cart_over25, eval_cart25, msg_cart25)
+    ]
+    return optiuni
+
 # =============================================================================
-# PROCESARE MECI SELECTAT
+# PROCESARE DATE & GENERARE BILET
 # =============================================================================
 
 matches = fetch_matches(api_key)
 
+toate_pariurile_aprobate = []
+
 if matches:
-    match_options = {f"{m['homeTeam']['name']} vs {m['awayTeam']['name']} ({m['competition']['name']})": m for m in matches}
-    if "selected_match_key" not in st.session_state or st.session_state.selected_match_key not in match_options:
-        st.session_state.selected_match_key = list(match_options.keys())[0]
+    with st.spinner("Analizăm toate meciurile viitoare din ligi..."):
+        # Analizăm primele 10 meciuri pentru eficiență
+        for m in matches[:10]:
+            optiuni = analizeaza_meci(m, api_key, coef_arbitru, medie_cornere_meci)
+            for item in optiuni:
+                # item: (Meci, Tip Pariu, Probabilitate, EvaluatOK, Mesaj)
+                if item[3] and item[2] >= PROB_MINIMA:
+                    toate_pariurile_aprobate.append(item)
 
-    selected_match_name = st.selectbox("Alege Meciul de Analizat", list(match_options.keys()), key="selected_match_key")
-    selected_match = match_options[selected_match_name]
-    echipa_gazda = selected_match['homeTeam']['name']
-    echipa_oaspete = selected_match['awayTeam']['name']
-    
-    with st.spinner("Procesare modele Poisson și verificare limite de siguranță..."):
-        h_avg_s, h_avg_c, h_recent_goals = get_team_advanced_stats(selected_match['homeTeam']['id'], api_key)
-        a_avg_s, a_avg_c, a_recent_goals = get_team_advanced_stats(selected_match['awayTeam']['id'], api_key)
-else:
-    st.info("Nu s-au găsit meciuri viitoare programate în API-ul curent.")
-    echipa_gazda, echipa_oaspete = "Genoa", "Como"
-    h_avg_s, h_avg_c, h_recent_goals = 1.10, 1.40, [1, 2, 1, 0, 2]
-    a_avg_s, a_avg_c, a_recent_goals = 1.30, 1.20, [2, 1, 3, 1, 1]
+# Sortăm toate selecțiile din toate meciurile după probabilitate
+toate_pariurile_aprobate = sorted(toate_pariurile_aprobate, key=lambda x: x[2], reverse=True)
 
-# CÂMPURI FIXE INTRODUSE PENTRU STRUCTURĂ
-cart_gazde, cart_oaspeti = 2.1, 1.9
-istoric_cornere = [10, 8, 11, 9, 12]
+# Selectăm 2 opțiuni din meciuri DIFERITE pentru Biletul Zilei
+biletul_zilei = []
+meciuri_folosite = set()
 
-# CALCULAT XG & POISSON
-exp_g_home = round((h_avg_s + a_avg_c) / 2, 2)
-exp_g_away = round((a_avg_s + h_avg_c) / 2, 2)
-
-max_goals = 6
-mat_full = np.zeros((max_goals, max_goals))
-for i in range(max_goals):
-    for j in range(max_goals):
-        mat_full[i, j] = poisson.pmf(i, exp_g_home) * poisson.pmf(j, exp_g_away)
-
-p_under35 = float(np.sum([mat_full[i, j] for i in range(4) for j in range(4) if i + j < 4]) * 100)
-p_over25 = 100 - float(np.sum([mat_full[i, j] for i in range(3) for j in range(3) if i + j < 3]) * 100)
-
-medie_cartonase_ajustata = (cart_gazde + cart_oaspeti) * coef_arbitru
-p_corn_over85 = (1 - poisson.cdf(8, medie_cornere_meci)) * 100
-p_cart_over35 = (1 - poisson.cdf(3, medie_cartonase_ajustata)) * 100
-p_cart_over25 = (1 - poisson.cdf(2, medie_cartonase_ajustata)) * 100
-
-# RULARE FILTRE
-eval_u35, msg_u35 = filtreaza_piata_goluri('SUB', 3.5, exp_g_home, exp_g_away, h_recent_goals, a_recent_goals)
-eval_o25, msg_o25 = filtreaza_piata_goluri('PESTE', 2.5, exp_g_home, exp_g_away, h_recent_goals, a_recent_goals)
-eval_corn, msg_corn = filtreaza_piata_cornere('PESTE', 8.5, medie_cornere_meci, istoric_cornere)
-eval_cart35, msg_cart35 = filtreaza_piata_cartonase('PESTE', 3.5, cart_gazde, cart_oaspeti, coef_arbitru)
-eval_cart25, msg_cart25 = filtreaza_piata_cartonase('PESTE', 2.5, cart_gazde, cart_oaspeti, coef_arbitru)
-
-toate_optiunile = [
-    ("Goluri: Sub 3.5 Goluri", p_under35, eval_u35, msg_u35),
-    ("Goluri: Peste 2.5 Goluri", p_over25, eval_o25, msg_o25),
-    ("Cornere: Peste 8.5 Cornere", p_corn_over85, eval_corn, msg_corn),
-    ("Cartonașe: Peste 3.5 Cartonașe", p_cart_over35, eval_cart35, msg_cart35),
-    ("Cartonașe: Peste 2.5 Cartonașe (Linie Sigură)", p_cart_over25, eval_cart25, msg_cart25)
-]
-
-# PARIURI APROBATE & FILTRATE DUPĂ PROBABILITATEA MINIMĂ
-aprobate = [item for item in toate_optiunile if item[2] and item[1] >= PROB_MINIMA]
-aprobate_sortate = sorted(aprobate, key=lambda x: x[1], reverse=True)
+for pariu in toate_pariurile_aprobate:
+    meci = pariu[0]
+    if meci not in meciuri_folosite:
+        biletul_zilei.append(pariu)
+        meciuri_folosite.add(meci)
+    if len(biletul_zilei) == 2:
+        break
 
 # =============================================================================
 # INTERFAȚĂ STREAMLIT
 # =============================================================================
 
-# PANOU PRINCIPAL 1: BILETUL ZILEI
-st.markdown("## 🎫 BILETUL ZILEI (Risc Scăzut & Cotă Optimă)")
+st.markdown("## 🎫 BILETUL ZILEI (Selectat din Toate Meciurile Disponibile)")
 
-if len(aprobate_sortate) >= 2:
-    sel1 = aprobate_sortate[0]
-    sel2 = aprobate_sortate[1]
+if len(biletul_zilei) >= 2:
+    sel1, sel2 = biletul_zilei[0], biletul_zilei[1]
     
-    cota1 = 100 / sel1[1]
-    cota2 = 100 / sel2[1]
+    cota1 = 100 / sel1[2]
+    cota2 = 100 / sel2[2]
     cota_totala = cota1 * cota2
-    prob_cumulata = (sel1[1] / 100) * (sel2[1] / 100) * 100
+    prob_cumulata = (sel1[2] / 100) * (sel2[2] / 100) * 100
 
     col_b1, col_b2, col_b3 = st.columns(3)
     col_b1.metric("Cotă Totală Estimată", f"{cota_totala:.2f}")
@@ -267,49 +271,45 @@ if len(aprobate_sortate) >= 2:
     col_b3.metric("Profil Risc", profil_risc)
 
     df_bilet = pd.DataFrame([
-        {"Meci": f"{echipa_gazda} vs {echipa_oaspete}", "Pariu": sel1[0], "Probabilitate": f"{sel1[1]:.1f}%", "Cotă": f"{cota1:.2f}"},
-        {"Meci": f"{echipa_gazda} vs {echipa_oaspete}", "Pariu": sel2[0], "Probabilitate": f"{sel2[1]:.1f}%", "Cotă": f"{cota2:.2f}"}
+        {"Meci": sel1[0], "Pariu": sel1[1], "Probabilitate": f"{sel1[2]:.1f}%", "Cotă": f"{cota1:.2f}"},
+        {"Meci": sel2[0], "Pariu": sel2[1], "Probabilitate": f"{sel2[2]:.1f}%", "Cotă": f"{cota2:.2f}"}
     ])
     st.table(df_bilet)
 else:
-    st.info("ℹ️ Pentru meciul curent nu există suficiente selecții care să treacă de profilul de risc selectat pentru a forma Biletul Zilei.")
+    st.info("ℹ️ Nu există suficiente meciuri/selecții care să treacă de criteriile de siguranță pentru a forma Biletul Zilei.")
 
 st.divider()
 
-# TAB-URI ANALIZĂ DETALIATĂ
-tab_builder, tab_toate, tab_debug = st.tabs(["⚡ Bet Builder Meci (~2.00)", "📋 Toate Selecțiile Aprobate", "🛡️ Detalii Filtre & Volatilitate"])
+# ANALIZĂ PE UN SINGUR MECI
+st.markdown("### 🔍 Analiză Detaliată pe Meci Individual")
+if matches:
+    match_options = {f"{m['homeTeam']['name']} vs {m['awayTeam']['name']} ({m['competition']['name']})": m for m in matches}
+    selected_match_name = st.selectbox("Alege Meciul de Analizat", list(match_options.keys()))
+    selected_match = match_options[selected_match_name]
+    
+    optiuni_meci = analizeaza_meci(selected_match, api_key, coef_arbitru, medie_cornere_meci)
+    aprobate_meci = sorted([o for o in optiuni_meci if o[3] and o[2] >= PROB_MINIMA], key=lambda x: x[2], reverse=True)
 
-with tab_builder:
-    st.markdown(f"### 🎯 Bet Builder Dedicat: {echipa_gazda} vs {echipa_oaspete}")
-    if len(aprobate_sortate) >= 2:
-        c1 = 100 / aprobate_sortate[0][1]
-        c2 = 100 / aprobate_sortate[1][1]
-        cota_bb = c1 * c2
-        st.success(f"**Combinație Recomandată (Cotă Totală: {cota_bb:.2f}):**")
-        st.markdown(f"* 🔹 **Selecția 1:** {aprobate_sortate[0][0]} (Șansă: {aprobate_sortate[0][1]:.1f}%)")
-        st.markdown(f"* 🔹 **Selecția 2:** {aprobate_sortate[1][0]} (Șansă: {aprobate_sortate[1][1]:.1f}%)")
-    else:
-        st.warning("Meciul are volatilitate ridicată. Nu se recomandă un Bet Builder pentru acest meci.")
+    tab_builder, tab_toate = st.tabs(["⚡ Bet Builder Meci (~2.00)", "📋 Selecții Aprobate Meci"])
 
-with tab_toate:
-    st.markdown("### 🏆 Top Pariuri cu Valoare (EV) Pozitivă")
-    if aprobate_sortate:
-        tabel_data = []
-        for item in aprobate_sortate:
-            cota_est = 100 / item[1]
-            tabel_data.append({
-                "Tip Pariu": item[0],
-                "Probabilitate Matematică": f"{item[1]:.1f}%",
-                "Cotă Minima Utilă": f"{cota_est:.2f}",
-                "Status Algoritm": item[3]
-            })
-        st.dataframe(pd.DataFrame(tabel_data), use_container_width=True)
-    else:
-        st.error("Nicio selecție nu a îndeplinit condițiile stricte de siguranță.")
+    with tab_builder:
+        if len(aprobate_meci) >= 2:
+            c1 = 100 / aprobate_meci[0][2]
+            c2 = 100 / aprobate_meci[1][2]
+            st.success(f"**Bet Builder Recomandat (Cotă: {c1*c2:.2f}):**")
+            st.markdown(f"* 🔹 {aprobate_meci[0][1]} ({aprobate_meci[0][2]:.1f}%)")
+            st.markdown(f"* 🔹 {aprobate_meci[1][1]} ({aprobate_meci[1][2]:.1f}%)")
+        else:
+            st.warning("Meciul are risc ridicat; nu se recomandă Bet Builder.")
 
-with tab_debug:
-    st.markdown("### 🔍 Indicatori de Volatilitate și Arbitraj")
-    st.write(f"* **Coeficient Strictețe Arbitru ($K_{{arbitru}}$):** {coef_arbitru:.2f}")
-    st.write(f"* **Medie Cartonașe Ajustată Meci:** {medie_cartonase_ajustata:.2f}")
-    st.write(f"* **xG Total Meci (Gazde + Oaspeți):** {exp_g_home + exp_g_away:.2f}")
-    st.write(f"* **Abatere Standard Permisă (Std Max):** {STD_MAX_PERMIS}")
+    with tab_toate:
+        if aprobate_meci:
+            tabel_data = [{
+                "Pariu": item[1],
+                "Probabilitate": f"{item[2]:.1f}%",
+                "Cotă Minima Utilă": f"{100/item[2]:.2f}",
+                "Status": item[4]
+            } for item in aprobate_meci]
+            st.dataframe(pd.DataFrame(tabel_data), use_container_width=True)
+        else:
+            st.error("Nicio selecție nu îndeplinește condițiile de siguranță pentru acest meci.")
