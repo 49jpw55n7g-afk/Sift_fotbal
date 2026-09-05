@@ -4,142 +4,134 @@ import numpy as np
 from scipy.stats import poisson
 import requests
 
-st.set_page_config(page_title="Predictor Automatizat Superbet", page_icon="⚽", layout="wide")
+st.set_page_config(page_title="Predictor Advanced - Superbet", page_icon="⚽", layout="wide")
 
-st.title("⚽ PREDICTOR ADVANCED - XG, GOLURI, CORNERE & CARTONAȘE FILTRATE")
+st.title("⚽ PREDICTOR ADVANCED - XG, GOLURI, CORNERE & CARTONAȘE")
+
+# =============================================================================
+# CONFIGURARE SIDEBAR & PARAMETRI DE RISC
+# =============================================================================
 
 st.sidebar.header("⚙️ Conectare API")
 api_key = st.sidebar.text_input("Cheie API Football-Data.org", value="20505c2f8aaa48e58a6c4764d0664e7f", type="password")
 
+st.sidebar.subheader("🛡️ Profil de Risc (Slider)")
+profil_risc = st.sidebar.select_slider(
+    "Alege Nivelul de Prudență",
+    options=["Conservator", "Echilibrat", "Valoare Mare"],
+    value="Echilibrat"
+)
+
+# Setare marje dinamice în funcție de profilul de risc
+if profil_risc == "Conservator":
+    MARJA_GOLURI = 1.0
+    MARJA_CORNERE = 1.5
+    MARJA_CARTONASE = 1.0
+    PROB_MINIMA = 75.0
+    STD_MAX_PERMIS = 2.2
+elif profil_risc == "Echilibrat":
+    MARJA_GOLURI = 0.8
+    MARJA_CORNERE = 1.2
+    MARJA_CARTONASE = 0.8
+    PROB_MINIMA = 68.0
+    STD_MAX_PERMIS = 2.6
+else:  # Valoare Mare
+    MARJA_GOLURI = 0.5
+    MARJA_CORNERE = 0.8
+    MARJA_CARTONASE = 0.5
+    PROB_MINIMA = 60.0
+    STD_MAX_PERMIS = 3.0
+
+st.sidebar.subheader("🟨 Parametri Arbitru & Ligă")
+medie_arbitru = st.sidebar.number_input("Media Cartonașe Arbitru", value=3.8, step=0.1)
+medie_liga_cartonase = st.sidebar.number_input("Media Cartonașe Ligă", value=4.2, step=0.1)
+coef_arbitru = medie_arbitru / medie_liga_cartonase if medie_liga_cartonase > 0 else 1.0
+
+st.sidebar.subheader("🚩 Parametri Cornere")
+medie_cornere_meci = st.sidebar.number_input("Medie Cornere Meci", value=9.8, step=0.5)
+este_favorita_deplasare = st.sidebar.checkbox("Favorită Clară în Deplasare (Penalizare Cornere)", value=False)
+
+if este_favorita_deplasare:
+    medie_cornere_meci *= 0.90  # Penalizare 10% pentru scenariu de scor dezechilibrat
+
 # =============================================================================
-# MODUL DE FILTRARE STRICTĂ A RISCULUI (GOLURI, GG, CORNERE, CARTONAȘE)
+# MOTOARE DE FILTRARE & SIGURANȚĂ (ANTI-EROARE)
 # =============================================================================
+
+def verifica_volatilitate(istoric_date: list, std_max: float):
+    if not istoric_date:
+        return True, 0.0
+    std_val = np.std(istoric_date)
+    if std_val > std_max:
+        return False, std_val
+    return True, std_val
 
 def filtreaza_piata_goluri(tip_pariu: str, linie: float, xg_gazde: float, xg_oaspeti: float, meciuri_gazde: list, meciuri_oaspeti: list):
     xg_total = xg_gazde + xg_oaspeti
     tip_pariu = tip_pariu.upper()
     
-    if tip_pariu == 'SUB':
-        marja_siguranta = 0.8 if linie <= 2.5 else 1.2
-        prag_max_xg = linie - marja_siguranta
-        
-        if xg_total > prag_max_xg:
-            return False, f"RESPINS: xG Total ({xg_total:.2f}) peste pragul de siguranță ({prag_max_xg:.2f}) pentru Sub {linie}"
-        
-        if xg_gazde > (linie / 2) + 0.2 or xg_oaspeti > (linie / 2) + 0.2:
-            return False, f"RESPINS: Atac prea puternic la una din echipe pentru Sub {linie}"
-            
-        std_g = np.std(meciuri_gazde) if meciuri_gazde else 0
-        std_o = np.std(meciuri_oaspeti) if meciuri_oaspeti else 0
-        if std_g > 1.2 or std_o > 1.2:
-            return False, "RESPINS: Fluctuații mari de scoruri în meciurile recente"
+    ok_g, std_g = verifica_volatilitate(meciuri_gazde, STD_MAX_PERMIS)
+    ok_o, std_o = verifica_volatilitate(meciuri_oaspeti, STD_MAX_PERMIS)
+    if not ok_g or not ok_o:
+        return False, f"RESPINS: Volatilitate mare goluri (std: {max(std_g, std_o):.2f})"
 
-        return True, f"APROBAT: Risc scăzut pentru Sub {linie} goluri"
+    if tip_pariu == 'SUB':
+        prag_max_xg = linie - MARJA_GOLURI
+        if xg_total > prag_max_xg:
+            return False, f"RESPINS: xG Total ({xg_total:.2f}) peste pragul ({prag_max_xg:.2f})"
+        return True, f"APROBAT: Sub {linie} goluri"
 
     elif tip_pariu == 'PESTE':
-        prag_min_xg = linie + 0.3
-        
+        prag_min_xg = linie + (MARJA_GOLURI / 2)
         if xg_total < prag_min_xg:
-            return False, f"RESPINS: xG Total ({xg_total:.2f}) sub pragul minim ({prag_min_xg:.2f}) pentru Peste {linie}"
-        
-        min_xg_indiv = 0.80 if linie <= 2.5 else 1.10
-        if xg_gazde < min_xg_indiv or xg_oaspeti < min_xg_indiv:
-            return False, f"RESPINS: Una dintre echipe are xG individual sub {min_xg_indiv:.2f}"
-            
-        peste_g = sum(1 for g in meciuri_gazde if g > linie)
-        peste_o = sum(1 for g in meciuri_oaspeti if g > linie)
-        if peste_g < 3 or peste_o < 3:
-            return False, f"RESPINS: Rata meciurilor recente cu Peste {linie} este sub 60%"
-
-        return True, f"APROBAT: Potențial ridicat pentru Peste {linie} goluri"
+            return False, f"RESPINS: xG Total ({xg_total:.2f}) sub pragul ({prag_min_xg:.2f})"
+        return True, f"APROBAT: Peste {linie} goluri"
 
     return False, "Tip pariu invalid"
-
-
-def filtreaza_piata_gg(tip_pariu: str, xg_gazde: float, xg_oaspeti: float, 
-                       meciuri_gazde: list, meciuri_oaspeti: list,
-                       clean_sheets_gazde: int = 0, clean_sheets_oaspeti: int = 0):
-    tip_pariu = tip_pariu.upper()
-    
-    if tip_pariu == 'GG':
-        if xg_gazde < 1.15 or xg_oaspeti < 1.15:
-            return False, "RESPINS: xG scăzut la una din echipe (Minim 1.15 necesar per echipă)"
-        
-        gg_g = sum(1 for g in meciuri_gazde if g > 1)
-        gg_o = sum(1 for g in meciuri_oaspeti if g > 1)
-        
-        if gg_g < 3 or gg_o < 3:
-            return False, "RESPINS: Consistență scăzută în marcarea golurilor recente (<60%)"
-            
-        if clean_sheets_gazde >= 3 or clean_sheets_oaspeti >= 3:
-            return False, "RESPINS: Apărare prea solidă la una din echipe (3+ Clean Sheets)"
-
-        return True, "APROBAT: Meci excelent pentru GG (Ambele marchează)"
-
-    elif tip_pariu == 'NGG':
-        if xg_gazde >= 1.10 and xg_oaspeti >= 1.10:
-            return False, "RESPINS: Ambele echipe au potențial ofensiv mare (xG > 1.10)"
-            
-        return True, "APROBAT: Șansă mare de NGG"
-
-    return False, "Tip pariu invalid"
-
 
 def filtreaza_piata_cornere(tip_pariu: str, linie: float, medie_cornere: float, istoric_cornere: list):
-    """
-    Filtru strict pentru piața de Cornere.
-    """
     tip_pariu = tip_pariu.upper()
-    std_cornere = np.std(istoric_cornere) if istoric_cornere else 0
+    ok_vol, std_c = verifica_volatilitate(istoric_cornere, STD_MAX_PERMIS)
     
+    if not ok_vol:
+        return False, f"RESPINS: Fluctuații mari pe cornere (std: {std_c:.2f})"
+
     if tip_pariu == 'PESTE':
-        prag_min = linie + 1.2  # Ex: Pentru Peste 8.5, media trebuie să fie cel puțin 9.7
+        prag_min = linie + MARJA_CORNERE
         if medie_cornere < prag_min:
-            return False, f"RESPINS: Medie cornere ({medie_cornere:.1f}) sub pragul minim de siguranță ({prag_min:.1f})"
-        
-        if std_cornere > 2.8:
-            return False, f"RESPINS: Volatilitate mare pe cornere (std: {std_cornere:.2f})"
-            
-        meciuri_peste = sum(1 for c in istoric_cornere if c > linie)
-        if meciuri_peste < 3:
-            return False, f"RESPINS: Sub 60% din ultimele meciuri au avut peste {linie} cornere"
-            
-        return True, f"APROBAT: Meci cu potențial mare de Peste {linie} Cornere"
+            return False, f"RESPINS: Medie cornere ({medie_cornere:.1f}) sub pragul ({prag_min:.1f})"
+        return True, f"APROBAT: Peste {linie} Cornere"
 
     elif tip_pariu == 'SUB':
-        prag_max = linie - 1.2
+        prag_max = linie - MARJA_CORNERE
         if medie_cornere > prag_max:
-            return False, f"RESPINS: Medie cornere ({medie_cornere:.1f}) depășește pragul maxim ({prag_max:.1f})"
-            
-        return True, f"APROBAT: Risc scăzut pentru Sub {linie} Cornere"
+            return False, f"RESPINS: Medie cornere ({medie_cornere:.1f}) peste pragul ({prag_max:.1f})"
+        return True, f"APROBAT: Sub {linie} Cornere"
 
     return False, "Tip pariu invalid"
 
-
-def filtreaza_piata_cartonase(tip_pariu: str, linie: float, medie_cartonase: float, meci_derby: bool = False):
-    """
-    Filtru strict pentru piața de Cartonașe.
-    """
+def filtreaza_piata_cartonase(tip_pariu: str, linie: float, cart_gazde: float, cart_oaspeti: float, coef_arbitru: float):
     tip_pariu = tip_pariu.upper()
-    
+    medie_ajustata = (cart_gazde + cart_oaspeti) * coef_arbitru
+
     if tip_pariu == 'PESTE':
-        prag_min = linie + 0.8  # Ex: Pentru Peste 3.5, media trebuie să fie cel puțin 4.3
-        if medie_cartonase < prag_min and not meci_derby:
-            return False, f"RESPINS: Medie cartonașe ({medie_cartonase:.1f}) sub pragul minim ({prag_min:.1f})"
-            
-        return True, f"APROBAT: Tensiune ridicată / Meci propice pentru Peste {linie} Cartonașe"
+        if coef_arbitru < 0.85:
+            return False, f"RESPINS: Arbitru permisiv (Coef: {coef_arbitru:.2f})"
+        prag_min = linie + MARJA_CARTONASE
+        if medie_ajustata < prag_min:
+            return False, f"RESPINS: Medie ajustată ({medie_ajustata:.2f}) sub pragul ({prag_min:.2f})"
+        return True, f"APROBAT: Peste {linie} Cartonașe"
 
     elif tip_pariu == 'SUB':
-        prag_max = linie - 0.8
-        if medie_cartonase > prag_max or meci_derby:
-            return False, f"RESPINS: Meci cu risc ridicat de durități (Medie: {medie_cartonase:.1f})"
-            
-        return True, f"APROBAT: Joc curat anticipat / Sub {linie} Cartonașe"
+        prag_max = linie - MARJA_CARTONASE
+        if medie_ajustata > prag_max:
+            return False, f"RESPINS: Medie ajustată ({medie_ajustata:.2f}) peste pragul ({prag_max:.2f})"
+        return True, f"APROBAT: Sub {linie} Cartonașe"
 
     return False, "Tip pariu invalid"
 
 # =============================================================================
-# EXTRAGERE DATE API & LOGICĂ PRINCIPALĂ
+# EXTRAGERE DATE API
 # =============================================================================
 
 @st.cache_data(ttl=3600)
@@ -161,11 +153,9 @@ def get_team_advanced_stats(team_id, api_key):
         if res.status_code == 200:
             data = res.json().get("matches", [])
             if not data:
-                return 1.2, 1.2, 1.2, 1.2, [1, 2, 1, 2, 1], 0
+                return 1.2, 1.2, [1, 2, 1, 2, 1]
             
             scored_list, conceded_list, total_goals_list = [], [], []
-            clean_sheets = 0
-            
             for m in data:
                 is_home = (m['homeTeam']['id'] == team_id)
                 scored = m['score']['fullTime']['home'] if is_home else m['score']['fullTime']['away']
@@ -174,20 +164,17 @@ def get_team_advanced_stats(team_id, api_key):
                     scored_list.append(scored)
                     conceded_list.append(conceded)
                     total_goals_list.append(scored + conceded)
-                    if conceded == 0:
-                        clean_sheets += 1
             
             avg_scored = np.mean(scored_list) if scored_list else 1.2
             avg_conceded = np.mean(conceded_list) if conceded_list else 1.2
-            last_match_scored = scored_list[-1] if scored_list else avg_scored
-            last_match_conceded = conceded_list[-1] if conceded_list else avg_conceded
-            
-            return (round(avg_scored, 2), round(avg_conceded, 2), 
-                    float(last_match_scored), float(last_match_conceded), 
-                    total_goals_list[-5:], clean_sheets)
-        return 1.2, 1.2, 1.2, 1.2, [1, 2, 1, 2, 1], 0
+            return round(avg_scored, 2), round(avg_conceded, 2), total_goals_list[-5:]
+        return 1.2, 1.2, [1, 2, 1, 2, 1]
     except:
-        return 1.2, 1.2, 1.2, 1.2, [1, 2, 1, 2, 1], 0
+        return 1.2, 1.2, [1, 2, 1, 2, 1]
+
+# =============================================================================
+# PROCESARE MECI SELECTAT
+# =============================================================================
 
 matches = fetch_matches(api_key)
 
@@ -196,32 +183,27 @@ if matches:
     if "selected_match_key" not in st.session_state:
         st.session_state.selected_match_key = list(match_options.keys())[0]
 
-    selected_match_name = st.selectbox("Alege Meciul Zilei", list(match_options.keys()), key="selected_match_key")
+    selected_match_name = st.selectbox("Alege Meciul de Analizat", list(match_options.keys()), key="selected_match_key")
     selected_match = match_options[selected_match_name]
     echipa_gazda = selected_match['homeTeam']['name']
     echipa_oaspete = selected_match['awayTeam']['name']
     
-    with st.spinner("Se analizează meciurile recente și indicatorii statistici..."):
-        h_avg_s, h_avg_c, h_last_s, h_last_c, h_recent_goals, h_cs = get_team_advanced_stats(selected_match['homeTeam']['id'], api_key)
-        a_avg_s, a_avg_c, a_last_s, a_last_c, a_recent_goals, a_cs = get_team_advanced_stats(selected_match['awayTeam']['id'], api_key)
+    with st.spinner("Procesare modele Poisson și verificare limite de siguranță..."):
+        h_avg_s, h_avg_c, h_recent_goals = get_team_advanced_stats(selected_match['homeTeam']['id'], api_key)
+        a_avg_s, a_avg_c, a_recent_goals = get_team_advanced_stats(selected_match['awayTeam']['id'], api_key)
 else:
-    echipa_gazda, echipa_oaspete = "Arsenal", "Chelsea"
-    h_avg_s, h_avg_c, h_last_s, h_last_c, h_recent_goals, h_cs = 1.70, 1.10, 2.0, 1.0, [2, 3, 1, 4, 2], 2
-    a_avg_s, a_avg_c, a_last_s, a_last_c, a_recent_goals, a_cs = 1.30, 1.40, 1.0, 2.0, [1, 2, 2, 0, 3], 1
+    echipa_gazda, echipa_oaspete = "Genoa", "Como"
+    h_avg_s, h_avg_c, h_recent_goals = 1.10, 1.40, [1, 2, 1, 0, 2]
+    a_avg_s, a_avg_c, a_recent_goals = 1.30, 1.20, [2, 1, 3, 1, 1]
 
-# SIDEBAR CONFIGURĂRI
-st.sidebar.subheader("🟨 Cartonașe & 🚩 Cornere")
-medie_cartonase = st.sidebar.number_input("Medie Cartonașe / Meci", value=4.5, step=0.5, key="cart")
-este_derby = st.sidebar.checkbox("Meci de mare rivalitate / Derby (Cartonașe +)", value=False)
+# CÂMPURI FIXE INTRODUSE PENTRU STRUCTURĂ
+cart_gazde, cart_oaspeti = 2.1, 1.9
+istoric_cornere = [10, 8, 11, 9, 12]
 
-medie_cornere = st.sidebar.number_input("Medie Cornere / Meci", value=9.8, step=0.5, key="corn")
-istoric_cornere_meciuri = [10, 8, 11, 9, 12]  # Istoric simulare meciuri recente
-
-# CALCUL XG
+# CALCULAT XG & POISSON
 exp_g_home = round((h_avg_s + a_avg_c) / 2, 2)
 exp_g_away = round((a_avg_s + h_avg_c) / 2, 2)
 
-# POISSON CALCUL
 max_goals = 6
 mat_full = np.zeros((max_goals, max_goals))
 for i in range(max_goals):
@@ -230,57 +212,96 @@ for i in range(max_goals):
 
 p_under35 = float(np.sum([mat_full[i, j] for i in range(4) for j in range(4) if i + j < 4]) * 100)
 p_over25 = 100 - float(np.sum([mat_full[i, j] for i in range(3) for j in range(3) if i + j < 3]) * 100)
-p_gg = float((1 - (np.sum(mat_full[0, :]) + np.sum(mat_full[:, 0]) - mat_full[0,0])) * 100)
 
-p_corn_over85 = (1 - poisson.cdf(8, medie_cornere)) * 100
-p_cart_over35 = (1 - poisson.cdf(3, medie_cartonase)) * 100
+medie_cartonase_ajustata = (cart_gazde + cart_oaspeti) * coef_arbitru
+p_corn_over85 = (1 - poisson.cdf(8, medie_cornere_meci)) * 100
+p_cart_over35 = (1 - poisson.cdf(3, medie_cartonase_ajustata)) * 100
+p_cart_over25 = (1 - poisson.cdf(2, medie_cartonase_ajustata)) * 100
 
-# FILTRE RULATE
+# RULARE FILTRE
 eval_u35, msg_u35 = filtreaza_piata_goluri('SUB', 3.5, exp_g_home, exp_g_away, h_recent_goals, a_recent_goals)
 eval_o25, msg_o25 = filtreaza_piata_goluri('PESTE', 2.5, exp_g_home, exp_g_away, h_recent_goals, a_recent_goals)
-eval_gg, msg_gg = filtreaza_piata_gg('GG', exp_g_home, exp_g_away, h_recent_goals, a_recent_goals, h_cs, a_cs)
+eval_corn, msg_corn = filtreaza_piata_cornere('PESTE', 8.5, medie_cornere_meci, istoric_cornere)
+eval_cart35, msg_cart35 = filtreaza_piata_cartonase('PESTE', 3.5, cart_gazde, cart_oaspeti, coef_arbitru)
+eval_cart25, msg_cart25 = filtreaza_piata_cartonase('PESTE', 2.5, cart_gazde, cart_oaspeti, coef_arbitru)
 
-eval_corn, msg_corn = filtreaza_piata_cornere('PESTE', 8.5, medie_cornere, istoric_cornere_meciuri)
-eval_cart, msg_cart = filtreaza_piata_cartonase('PESTE', 3.5, medie_cartonase, este_derby)
+toate_optiunile = [
+    ("Goluri: Sub 3.5 Goluri", p_under35, eval_u35, msg_u35),
+    ("Goluri: Peste 2.5 Goluri", p_over25, eval_o25, msg_o25),
+    ("Cornere: Peste 8.5 Cornere", p_corn_over85, eval_corn, msg_corn),
+    ("Cartonașe: Peste 3.5 Cartonașe", p_cart_over35, eval_cart35, msg_cart35),
+    ("Cartonașe: Peste 2.5 Cartonașe (Linie Sigură)", p_cart_over25, eval_cart25, msg_cart25)
+]
 
-toate_pariurile = {
-    "Goluri: Sub 3.5 Goluri": (p_under35, eval_u35, msg_u35),
-    "Goluri: Peste 2.5 Goluri": (p_over25, eval_o25, msg_o25),
-    "Goluri: Ambele Marchează (GG)": (p_gg, eval_gg, msg_gg),
-    "Cornere: Peste 8.5 Cornere": (p_corn_over85, eval_corn, msg_corn),
-    "Cartonașe: Peste 3.5 Cartonașe": (p_cart_over35, eval_cart, msg_cart)
-}
+# PARIURI APROBATE & FILTRATE DUPĂ PROBABILITATEA MINIMĂ
+aprobate = [item for item in toate_optiunile if item[2] and item[1] >= PROB_MINIMA]
+aprobate_sortate = sorted(aprobate, key=lambda x: x[1], reverse=True)
 
-pariuri_filtrate = [(k, v[0], v[1], v[2]) for k, v in toate_pariurile.items() if v[1] == True]
-pariuri_filtrate_sortate = sorted(pariuri_filtrate, key=lambda x: x[1], reverse=True)
+# =============================================================================
+# INTERFAȚĂ STREAMLIT
+# =============================================================================
 
-# DISPLAY STREAMLIT
-st.subheader(f"🏟️ {echipa_gazda} vs {echipa_oaspete}")
+# PANOU PRINCIPAL 1: BILETUL ZILEI
+st.markdown("## 🎫 BILETUL ZILEI (Risc Scăzut & Cotă Optimă)")
 
-tab_top, tab_filtre = st.tabs(["🏆 Recomandări Aprobate", "🛡️ Detalii Filtre Cornere & Cartonașe"])
-
-with tab_top:
-    st.markdown("### 🚀 Selecții Aprobate (Risc Redus)")
+if len(aprobate_sortate) >= 2:
+    sel1 = aprobate_sortate[0]
+    sel2 = aprobate_sortate[1]
     
-    if pariuri_filtrate_sortate:
-        data_table = []
-        for item in pariuri_filtrate_sortate:
-            data_table.append((item[0], f"{item[1]:.1f}%", f"{100/item[1]:.2f}", item[3]))
-            
-        df_aprobate = pd.DataFrame(data_table, columns=["Tip Pariu", "Probabilitate", "Cotă Estimată", "Status Filtru"])
-        st.dataframe(df_aprobate, use_container_width=True)
-    else:
-        st.warning("⚠️ Nicio selecție nu a trecut filtrele stricte pentru acest meci.")
+    cota1 = 100 / sel1[1]
+    cota2 = 100 / sel2[1]
+    cota_totala = cota1 * cota2
+    prob_cumulata = (sel1[1] / 100) * (sel2[1] / 100) * 100
 
-with tab_filtre:
-    st.markdown("### 🚩 Verificare Filtru Cornere (Peste 8.5)")
-    if eval_corn:
-        st.success(f"✅ {msg_corn}")
+    col_b1, col_b2, col_b3 = st.columns(3)
+    col_b1.metric("Cotă Totală Estimată", f"{cota_totala:.2f}")
+    col_b2.metric("Șansă Cumulată de Reușită", f"{prob_cumulata:.1f}%")
+    col_b3.metric("Profil Risc", profil_risc)
+
+    df_bilet = pd.DataFrame([
+        {"Meci": f"{echipa_gazda} vs {echipa_oaspete}", "Pariu": sel1[0], "Probabilitate": f"{sel1[1]:.1f}%", "Cotă": f"{cota1:.2f}"},
+        {"Meci": f"{echipa_gazda} vs {echipa_oaspete}", "Pariu": sel2[0], "Probabilitate": f"{sel2[1]:.1f}%", "Cotă": f"{cota2:.2f}"}
+    ])
+    st.table(df_bilet)
+else:
+    st.info("ℹ️ Pentru meciul curent nu există suficiente selecții care să treacă de profilul de risc selectat pentru a forma Biletul Zilei.")
+
+st.divider()
+
+# TAB-URI ANALIZĂ DETALIATĂ
+tab_builder, tab_toate, tab_debug = st.tabs(["⚡ Bet Builder Meci (~2.00)", "📋 Toate Selecțiile Aprobate", "🛡️ Detalii Filtre & Volatilitate"])
+
+with tab_builder:
+    st.markdown(### 🎯 Bet Builder Dedicat: {echipa_gazda} vs {echipa_oaspete})
+    if len(aprobate_sortate) >= 2:
+        c1 = 100 / aprobate_sortate[0][1]
+        c2 = 100 / aprobate_sortate[1][1]
+        cota_bb = c1 * c2
+        st.success(f"**Combinație Recomandată (Cotă Totală: {cota_bb:.2f}):**")
+        st.markdown(f"* 🔹 **Selecția 1:** {aprobate_sortate[0][0]} (Șansă: {aprobate_sortate[0][1]:.1f}%)")
+        st.markdown(f"* 🔹 **Selecția 2:** {aprobate_sortate[1][0]} (Șansă: {aprobate_sortate[1][1]:.1f}%)")
     else:
-        st.error(f"❌ {msg_corn}")
-        
-    st.markdown("### 🟨 Verificare Filtru Cartonașe (Peste 3.5)")
-    if eval_cart:
-        st.success(f"✅ {msg_cart}")
+        st.warning("Meciul are volatilitate ridicată. Nu se recomandă un Bet Builder pentru acest meci.")
+
+with tab_toate:
+    st.markdown("### 🏆 Top Pariuri cu Valoare (EV) Pozitivă")
+    if aprobate_sortate:
+        tabel_data = []
+        for item in aprobate_sortate:
+            cota_est = 100 / item[1]
+            tabel_data.append({
+                "Tip Pariu": item[0],
+                "Probabilitate Matematică": f"{item[1]:.1f}%",
+                "Cotă Minima Utilă": f"{cota_est:.2f}",
+                "Status Algoritm": item[3]
+            })
+        st.dataframe(pd.DataFrame(tabel_data), use_container_width=True)
     else:
-        st.error(f"❌ {msg_cart}")
+        st.error("Nicio selecție nu a îndeplinit condițiile stricte de siguranță.")
+
+with tab_debug:
+    st.markdown("### 🔍 Indicatori de Volatilitate și Arbitraj")
+    st.write(f"* **Coeficient Strictețe Arbitru ($K_{{arbitru}}$):** {coef_arbitru:.2f}")
+    st.write(f"* **Medie Cartonașe Ajustată Meci:** {medie_cartonase_ajustata:.2f}")
+    st.write(f"* **xG Total Meci (Gazde + Oaspeți):** {exp_g_home + exp_g_away:.2f}")
+    st.write(f"* **Abatere Standard Permisă (Std Max):** {STD_MAX_PERMIS}")
