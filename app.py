@@ -5,7 +5,7 @@ from datetime import datetime
 import numpy as np
 import requests
 from scipy.stats import poisson
-from understatapi import Understat
+from understatapi import UnderstatClient
 
 # ==========================================
 # CONFIGURARE MEDIU & NIVELE DE SIGURANȚĂ
@@ -139,7 +139,7 @@ def analyze_match_pro(
 # ==========================================
 def fetch_weighted_team_xg(season: int, team_name: str, is_home: bool, last_n: int = 5):
     """Preluare xG din Understat cu ponderare exponențială și filtrare pe meciuri acasă/deplasare."""
-    understat = Understat()
+    understat = UnderstatClient()
     try:
         results = understat.get_team_results(team_name=team_name, season=season)
         played = [m for m in results if m.get('xG') is not None]
