@@ -1,6 +1,6 @@
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 import requests
 import streamlit as st
 import numpy as np
@@ -8,24 +8,24 @@ from scipy.stats import poisson
 
 st.set_page_config(page_title="Predicții xG Meciuri", page_icon="⚽", layout="wide")
 
-st.title("⚽ Predicții Automate xG - Meciuri & Analiză")
+st.title("⚽ Predicții Automate xG - Meciurile Zilei (Live & Programate)")
 
 LEAGUES = {
     "🇮🇹 Serie A (Italia)": "Serie_A",
-    "🏴󠁧󠁢󠁥󠁮󠁧󠁿 Premier League (Anglia)": "EPL",
     "🇪🇸 La Liga (Spania)": "La_Liga",
+    "🇷🇴 Superliga (România)": "ROU_1",
+    "🏴󠁧󠁢󠁥󠁮󠁧󠁿 Premier League (Anglia)": "EPL",
     "🇩🇪 Bundesliga (Germania)": "Bundesliga",
-    "🇫🇷 Ligue 1 (Franța)": "Ligue_1",
-    "🇷🇴 Superliga (România)": "ROU_1"
+    "🇫🇷 Ligue 1 (Franța)": "Ligue_1"
 }
 
-# Program / Meciuri pentru Superliga (România)
+# Program Runda Curentă / Azi Superliga România
 ROMANIA_FIXTURES = [
-    {"h": "FCSB", "a": "Dinamo București", "time": "Etapa Curentă - 20:30"},
-    {"h": "CFR Cluj", "a": "FC Botoșani", "time": "Etapa Curentă - 18:00"},
-    {"h": "Rapid București", "a": "Universitatea Craiova", "time": "Etapa Curentă - 20:00"},
-    {"h": "Farul Constanța", "a": "U Cluj", "time": "Etapa Curentă - 17:30"},
-    {"h": "Sepsi OSK", "a": "UTA Arad", "time": "Etapa Curentă - 19:00"}
+    {"h": "Universitatea Craiova", "a": "U Cluj", "time": "Azi - 20:30", "status": "AZI"},
+    {"h": "FC Voluntari", "a": "FC Argeș Pitești", "time": "Azi - Finalizat", "status": "JUCAT"},
+    {"h": "FCSB", "a": "Dinamo București", "time": "Etapa Curentă - 20:30", "status": "VIITOR"},
+    {"h": "CFR Cluj", "a": "FC Botoșani", "time": "Etapa Curentă - 18:00", "status": "VIITOR"},
+    {"h": "Rapid București", "a": "Farul Constanța", "time": "Etapa Curentă - 20:00", "status": "VIITOR"}
 ]
 
 ROMANIA_TEAMS = {
@@ -38,10 +38,12 @@ ROMANIA_TEAMS = {
     "UTA Arad": {"avg_xg_scored": 1.15, "avg_xg_conceded": 1.35},
     "U Cluj": {"avg_xg_scored": 1.20, "avg_xg_conceded": 1.15},
     "Dinamo București": {"avg_xg_scored": 1.20, "avg_xg_conceded": 1.30},
-    "FC Botoșani": {"avg_xg_scored": 1.00, "avg_xg_conceded": 1.45}
+    "FC Botoșani": {"avg_xg_scored": 1.00, "avg_xg_conceded": 1.45},
+    "FC Voluntari": {"avg_xg_scored": 1.10, "avg_xg_conceded": 1.25},
+    "FC Argeș Pitești": {"avg_xg_scored": 1.05, "avg_xg_conceded": 1.30}
 }
 
-@st.cache_data(ttl=1800)
+@st.cache_data(ttl=600)
 def get_league_data(league_code):
     if league_code == "ROU_1":
         return "LOCAL", ROMANIA_FIXTURES
@@ -126,38 +128,31 @@ with col_l:
     if teams_data:
         stats, league_avg = calculate_team_stats(teams_data)
         
-        st.subheader("📌 Meciuri Disponibile")
-        
-        match_type = st.radio("Tip Meciuri:", ["Programate / Viitoare", "Rezultate Recente / Analiză"], index=0)
+        st.subheader("📌 Selectează Meciul")
         
         match_options = []
         parsed_matches = []
 
         if league_code == "ROU_1":
             for m in dates_data:
-                match_options.append(f"{m['h']} vs {m['a']} ({m['time']})")
+                match_options.append(f"[{m['status']}] {m['h']} vs {m['a']} ({m['time']})")
                 parsed_matches.append((m['h'], m['a']))
         elif dates_data:
-            if match_type == "Programate / Viitoare":
-                matches_list = [m for m in dates_data if m.get('isResult') == False]
-                if not matches_list:
-                    st.warning("Nu există meciuri programate în ultimele 24-48h (pauză competițională/etapă finalizată). Se afișează meciurile următoare disponibile:")
-                    matches_list = dates_data[-10:]
-            else:
-                matches_list = [m for m in dates_data if m.get('isResult') == True][-15:]
-                matches_list.reverse()
-
-            for m in matches_list:
-                dt = m.get('datetime', '')[:16].replace(' ', ' - ')
-                match_options.append(f"{m['h']['title']} vs {m['a']['title']} [{dt}]")
+            # Extragere meciuri din ultimele 20 de evenimente (inclusiv meciurile de azi)
+            recent_and_upcoming = dates_data[-20:]
+            
+            for m in recent_and_upcoming:
+                dt = m.get('datetime', '')[:16].replace(' ', ' ora ')
+                is_done = "JUCAT" if m.get('isResult') else "PROGRAMAT/LIVE"
+                
+                match_options.append(f"[{is_done}] {m['h']['title']} vs {m['a']['title']} ({dt})")
                 parsed_matches.append((m['h']['title'], m['a']['title']))
 
         if match_options:
-            selected_match_str = st.selectbox("Selectează Meciul:", match_options)
+            selected_match_str = st.selectbox("Meciuri Curente / Programate:", match_options, index=len(match_options)-1 if len(match_options)>0 else 0)
             idx = match_options.index(selected_match_str)
             home_team, away_team = parsed_matches[idx]
         else:
-            st.info("Puteți selecta echipele manual de mai jos:")
             team_list = sorted(list(stats.keys()))
             home_team = st.selectbox("Echipa Gazdă:", team_list, index=0)
             away_team = st.selectbox("Echipa Oaspete:", team_list, index=min(1, len(team_list)-1))
