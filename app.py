@@ -1,5 +1,6 @@
 import math
 import re
+import unicodedata
 import requests
 import numpy as np
 from scipy.stats import poisson
@@ -21,10 +22,25 @@ LEAGUES = {
     "🇷🇴 Superliga (România)": {"espn": "rou.1", "understat": "ROU_1"}
 }
 
+# Listă completă de rezervă pentru ligile principale
+STATIC_TEAMS_FALLBACK = {
+    "ita.1": ["Udinese", "Lazio", "Inter", "Milan", "Juventus", "Atalanta", "Bologna", "Roma", "Napoli", "Fiorentina", "Torino", "Genoa", "Monza", "Hellas Verona", "Cagliari", "Lecce", "Empoli", "Parma", "Como", "Venezia"],
+    "esp.1": ["Elche", "Real Sociedad", "Real Madrid", "Barcelona", "Getafe", "Atletico Madrid", "Athletic Club", "Real Betis", "Villarreal", "Girona", "Sevilla", "Celta Vigo", "Osasuna", "Rayo Vallecano", "Espanyol", "Mallorca", "Alaves", "Las Palmas", "Leganes", "Valladolid"],
+    "eng.1": ["Arsenal", "Manchester City", "Liverpool", "Aston Villa", "Tottenham Hotspur", "Chelsea", "Manchester United", "Newcastle United", "West Ham United", "Brighton & Hove Albion", "Fulham", "Wolverhampton Wanderers", "AFC Bournemouth", "Crystal Palace", "Everton", "Brentford", "Nottingham Forest", "Leicester City", "Ipswich Town", "Southampton"],
+    "ger.1": ["Bayer Leverkusen", "Bayern Munich", "VfB Stuttgart", "RB Leipzig", "Borussia Dortmund", "Eintracht Frankfurt", "TSG Hoffenheim", "1. FC Heidenheim", "Werder Bremen", "SC Freiburg", "FC Augsburg", "VfL Wolfsburg", "FSV Mainz 05", "Borussia Monchengladbach", "Union Berlin", "FC St. Pauli", "Holstein Kiel", "VfL Bochum"],
+    "fra.1": ["Paris Saint-Germain", "AS Monaco", "Stade Brestois 29", "LOSC Lille", "OGC Nice", "Olympique Lyonnais", "RC Lens", "Olympique de Marseille", "Stade Rennais", "Toulouse FC", "Stade de Reims", "Montpellier HSC", "RC Strasbourg", "FC Nantes", "Le Havre AC", "AJ Auxerre", "Angers SCO", "AS Saint-Etienne"],
+    "rou.1": ["FCSB", "CFR Cluj", "Universitatea Craiova", "Rapid București", "Farul Constanța", "Sepsi OSK", "U Cluj", "Dinamo București", "UTA Arad", "Oțelul Galați", "FC Botoșani", "Petrolul Ploiești", "Hermannstadt", "Unirea Slobozia", "Gloria Buzău", "Poli Iași"]
+}
+
+def remove_diacritics(text):
+    """Elimină diacriticele și accentele pentru potrivire sigură."""
+    nfkd_form = unicodedata.normalize('NFKD', text)
+    return "".join([c for c in nfkd_form if not unicodedata.combining(c)])
+
 def clean_team_name(name):
-    """Normalizează numele echipelor eliminând sufixe/prefixe precum FC, CF, Calcio, AC, etc."""
-    name = name.lower()
-    patterns = [r'\bfc\b', r'\bcf\b', r'\bcalcio\b', r'\bac\b', r'\bas\b', r'\bssd\b', r'\bsc\b', r'\bud\b', r'\brcd\b', r'\bsd\b']
+    """Normalizează numele echipelor eliminând prefixe/sufixe uzuale."""
+    name = remove_diacritics(name.lower())
+    patterns = [r'\bfc\b', r'\bcf\b', r'\bcalcio\b', r'\bac\b', r'\bas\b', r'\bssd\b', r'\bsc\b', r'\bud\b', r'\brcd\b', r'\bsd\b', r'\bafc\b', r'\brc\b', r'\bvfl\b', r'\bvfb\b', r'\btsg\b', r'\bfsv\b', r'\blosc\b', r'\bogc\b']
     for p in patterns:
         name = re.sub(p, '', name)
     return name.strip()
@@ -36,6 +52,8 @@ def fetch_espn_data(espn_code):
     try:
         res = requests.get(url, timeout=10).json()
         matches = []
+        teams_found = set()
+        
         for ev in res.get('events', []):
             comp = ev['competitions'][0]
             teams = comp['competitors']
@@ -43,6 +61,9 @@ def fetch_espn_data(espn_code):
             away = next(t['team']['displayName'] for t in teams if t['homeAway'] == 'away')
             status = ev['status']['type']['shortDetail']
             is_completed = ev['status']['type']['completed']
+            
+            teams_found.add(home)
+            teams_found.add(away)
             
             score_home = int(teams[0]['score']) if is_completed and 'score' in teams[0] else None
             score_away = int(teams[1]['score']) if is_completed and 'score' in teams[1] else None
@@ -56,30 +77,22 @@ def fetch_espn_data(espn_code):
                 "score_home": score_home,
                 "score_away": score_away
             })
-        return matches
+        return matches, list(teams_found)
     except Exception:
-        return []
+        return [], []
 
 @st.cache_data(ttl=3600)
-def build_historical_team_database(league_code):
+def build_historical_team_database(espn_code, active_teams):
     """
-    Construiește baza de date xG calculată separat pentru ACASĂ și DEPLASARE.
+    Construiește baza de date xG combinând echipele active din API cu lista statică de rezervă.
     """
     np.random.seed(42)
     teams_mock_db = {}
     
-    base_teams = {
-        "ita.1": ["Udinese", "Lazio", "Inter", "Milan", "Juventus", "Atalanta", "Bologna", "Roma", "Napoli", "Fiorentina", "Torino", "Genoa", "Monza", "Hellas Verona", "Cagliari", "Lecce", "Empoli", "Parma", "Como", "Venezia"],
-        "esp.1": ["Real Madrid", "Barcelona", "Getafe", "Atletico Madrid", "Athletic Club", "Real Sociedad", "Betis", "Villarreal", "Girona", "Sevilla", "Celta Vigo", "Osasuna", "Rayo Vallecano", "Espanyol", "Mallorca", "Alaves", "Las Palmas", "Leganes", "Valladolid"],
-        "eng.1": ["Arsenal", "Manchester City", "Liverpool", "Aston Villa", "Tottenham", "Chelsea", "Manchester United", "Newcastle", "West Ham", "Brighton", "Fulham", "Wolverhampton", "Bournemouth", "Crystal Palace", "Everton", "Brentford", "Nottingham Forest", "Leicester", "Ipswich", "Southampton"],
-        "ger.1": ["Bayer Leverkusen", "Bayern Munich", "VfB Stuttgart", "RB Leipzig", "Borussia Dortmund", "Eintracht Frankfurt", "Hoffenheim", "Heidenheim", "Werder Bremen", "Freiburg", "Augsburg", "Wolfsburg", "Mainz 05", "Borussia Monchengladbach", "Union Berlin", "St. Pauli", "Holstein Kiel", "Bochum"],
-        "fra.1": ["Paris Saint-Germain", "Monaco", "Brest", "Lille", "Nice", "Lyon", "Lens", "Marseille", "Rennes", "Toulouse", "Reims", "Montpellier", "Strasbourg", "Nantes", "Le Havre", "Auxerre", "Angers", "Saint-Etienne"],
-        "rou.1": ["FCSB", "CFR Cluj", "Universitatea Craiova", "Rapid București", "Farul Constanța", "Sepsi OSK", "U Cluj", "Dinamo București", "UTA Arad", "Oțelul Galați", "FC Botoșani", "Petrolul Ploiești", "Hermannstadt", "Unirea Slobozia", "Gloria Buzău", "Poli Iași"]
-    }
+    fallback_teams = STATIC_TEAMS_FALLBACK.get(espn_code, [])
+    all_teams = list(set(fallback_teams + active_teams))
 
-    selected_list = base_teams.get(league_code, base_teams["ita.1"])
-
-    for team in selected_list:
+    for team in all_teams:
         home_xg_scored = np.random.normal(1.55, 0.35, 10).clip(0.3, 3.5)
         home_xg_conceded = np.random.normal(1.10, 0.30, 10).clip(0.2, 3.0)
         away_xg_scored = np.random.normal(1.25, 0.35, 10).clip(0.2, 3.2)
@@ -104,9 +117,9 @@ def build_historical_team_database(league_code):
 # 2. VALIDARE STRICTĂ TEAM MATCHING
 # ==========================================
 
-def match_team_strictly(input_name, team_database, threshold=0.50):
+def match_team_strictly(input_name, team_database, threshold=0.35):
     """
-    Caută potrivirea după numele curățat/normalizat.
+    Caută potrivirea după numele curățat și normalizat.
     """
     cleaned_input = clean_team_name(input_name)
 
@@ -115,7 +128,7 @@ def match_team_strictly(input_name, team_database, threshold=0.50):
         if clean_team_name(db_team) == cleaned_input:
             return db_team
 
-    # 2. Potrivire parțială / Substring
+    # 2. Potrivire parțială / Substring sau similitudine
     best_match = None
     best_score = 0.0
 
@@ -182,7 +195,7 @@ def calculate_dixon_coles_matrix(home_team, away_team, db, avg_home_xg, avg_away
 # ==========================================
 
 st.title("⚽ Model Avansat Predicții xG & Dixon-Coles")
-st.caption("Ajustare Home/Away • Time Decay Weights • Matrice 12x12 • Normalizare Nume Echipe")
+st.caption("Ajustare Home/Away • Time Decay Weights • Matrice 12x12 • Baza de Date Extinsă Multi-Ligă")
 
 tab_predict, tab_backtest = st.tabs(["🔮 Predicții Meciuri", "🧪 Backtesting Model"])
 
@@ -194,8 +207,8 @@ with tab_predict:
         selected_league_name = st.selectbox("Alege Competitia:", list(LEAGUES.keys()))
         league_info = LEAGUES[selected_league_name]
 
-        espn_matches = fetch_espn_data(league_info["espn"])
-        team_db, avg_h_xg, avg_a_xg = build_historical_team_database(league_info["espn"])
+        espn_matches, active_teams = fetch_espn_data(league_info["espn"])
+        team_db, avg_h_xg, avg_a_xg = build_historical_team_database(league_info["espn"], active_teams)
 
         if espn_matches:
             match_options = [f"{m['home']} vs {m['away']} ({m['status']})" for m in espn_matches]
@@ -213,7 +226,8 @@ with tab_predict:
         away_matched = match_team_strictly(raw_away, team_db)
 
         if not home_matched or not away_matched:
-            st.error(f"❌ **Eroare de potrivire!** Echipa '{raw_home if not home_matched else raw_away}' nu a fost găsită în baza de date.")
+            missing = raw_home if not home_matched else raw_away
+            st.error(f"❌ **Eroare de potrivire!** Echipa '{missing}' nu a fost găsită în baza de date.")
         elif home_matched == away_matched:
             st.warning("Selectează două echipe diferite.")
         else:
@@ -277,15 +291,15 @@ with tab_predict:
                 exact_scores = [((x, y), matrix[x, y]) for x in range(6) for y in range(6)]
                 exact_scores.sort(key=lambda item: item[1], reverse=True)
 
-                st.write("**Top 5 Scoruri Exacte Estimates:**")
+                st.write("**Top 5 Scoruri Exacte Estimate:**")
                 for (sc_h, sc_a), p_sc in exact_scores[:5]:
                     st.write(f"• **{sc_h} - {sc_a}** : Probabilitate `{p_sc*100:.1f}%` (Cotă reală: `{1/p_sc:.2f}`)")
 
 with tab_backtest:
     st.header("🧪 Backtesting Model pe Meciuri Finalizate")
     league_back = st.selectbox("Liga pentru Backtest:", list(LEAGUES.keys()), key="back_league")
-    matches_back = fetch_espn_data(LEAGUES[league_back]["espn"])
-    db_back, avg_h_b, avg_a_b = build_historical_team_database(LEAGUES[league_back]["espn"])
+    matches_back, active_b = fetch_espn_data(LEAGUES[league_back]["espn"])
+    db_back, avg_h_b, avg_a_b = build_historical_team_database(LEAGUES[league_back]["espn"], active_b)
 
     completed_matches = [m for m in matches_back if m['completed']]
 
