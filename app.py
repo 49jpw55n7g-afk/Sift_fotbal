@@ -22,7 +22,6 @@ LEAGUES = {
     "🇷🇴 Superliga (România)": {"espn": "rou.1", "understat": "ROU_1"}
 }
 
-# Listă completă de rezervă pentru ligile principale
 STATIC_TEAMS_FALLBACK = {
     "ita.1": ["Udinese", "Lazio", "Inter", "Milan", "Juventus", "Atalanta", "Bologna", "Roma", "Napoli", "Fiorentina", "Torino", "Genoa", "Monza", "Hellas Verona", "Cagliari", "Lecce", "Empoli", "Parma", "Como", "Venezia"],
     "esp.1": ["Elche", "Real Sociedad", "Real Madrid", "Barcelona", "Getafe", "Atletico Madrid", "Athletic Club", "Real Betis", "Villarreal", "Girona", "Sevilla", "Celta Vigo", "Osasuna", "Rayo Vallecano", "Espanyol", "Mallorca", "Alaves", "Las Palmas", "Leganes", "Valladolid"],
@@ -83,9 +82,7 @@ def fetch_espn_data(espn_code):
 
 @st.cache_data(ttl=3600)
 def build_historical_team_database(espn_code, active_teams):
-    """
-    Construiește baza de date xG combinând echipele active din API cu lista statică de rezervă.
-    """
+    """Construiește baza de date xG combinând echipele active cu lista de rezervă."""
     np.random.seed(42)
     teams_mock_db = {}
     
@@ -113,28 +110,18 @@ def build_historical_team_database(espn_code, active_teams):
 
     return teams_mock_db, avg_home_xg, avg_away_xg
 
-# ==========================================
-# 2. VALIDARE STRICTĂ TEAM MATCHING
-# ==========================================
-
 def match_team_strictly(input_name, team_database, threshold=0.35):
-    """
-    Caută potrivirea după numele curățat și normalizat.
-    """
     cleaned_input = clean_team_name(input_name)
 
-    # 1. Potrivire directă după curățare
     for db_team in team_database.keys():
         if clean_team_name(db_team) == cleaned_input:
             return db_team
 
-    # 2. Potrivire parțială / Substring sau similitudine
     best_match = None
     best_score = 0.0
 
     for db_team in team_database.keys():
         cleaned_db = clean_team_name(db_team)
-        
         if cleaned_input in cleaned_db or cleaned_db in cleaned_input:
             score = 0.85
         else:
@@ -148,10 +135,6 @@ def match_team_strictly(input_name, team_database, threshold=0.35):
         return best_match
     
     return None
-
-# ==========================================
-# 3. MODELUL DIXON-COLES & MATRICEA 12x12
-# ==========================================
 
 def dixon_coles_tau(x, y, lambda_x, mu_y, rho=-0.13):
     if x == 0 and y == 0:
@@ -190,12 +173,32 @@ def calculate_dixon_coles_matrix(home_team, away_team, db, avg_home_xg, avg_away
     matrix /= np.sum(matrix)
     return lambda_home, mu_away, matrix
 
+def get_recommended_bet(prob_home, prob_draw, prob_away, p_over25, p_btts_yes, home_team, away_team):
+    """Calculează pariul cu cea mai înaltă probabilitate/valoare estimată."""
+    bets = [
+        (f"1 (Victorie {home_team})", prob_home, 1 / prob_home if prob_home > 0 else 0),
+        (f"2 (Victorie {away_team})", prob_away, 1 / prob_away if prob_away > 0 else 0),
+        ("1X (Șansă Dublă Gazde)", prob_home + prob_draw, 1 / (prob_home + prob_draw)),
+        ("X2 (Șansă Dublă Oaspeți)", prob_away + prob_draw, 1 / (prob_away + prob_draw)),
+        ("Peste 2.5 Goluri", p_over25, 1 / p_over25 if p_over25 > 0 else 0),
+        ("Sub 2.5 Goluri", 1.0 - p_over25, 1 / (1.0 - p_over25) if (1.0 - p_over25) > 0 else 0),
+        ("Ambele Marchează (BTTS DA)", p_btts_yes, 1 / p_btts_yes if p_btts_yes > 0 else 0)
+    ]
+    
+    # Filtrăm opțiunile cu cotă între 1.30 și 2.50 pentru siguranță și valoare optime
+    viable_bets = [b for b in bets if 1.30 <= b[2] <= 2.50]
+    if not viable_bets:
+        viable_bets = bets
+
+    best_bet = max(viable_bets, key=lambda item: item[1])
+    return best_bet
+
 # ==========================================
 # 4. INTERFAȚA STREAMLIT
 # ==========================================
 
 st.title("⚽ Model Avansat Predicții xG & Dixon-Coles")
-st.caption("Ajustare Home/Away • Time Decay Weights • Matrice 12x12 • Baza de Date Extinsă Multi-Ligă")
+st.caption("Ajustare Home/Away • Time Decay Weights • Pariu Recomandat • Matrice 12x12")
 
 tab_predict, tab_backtest = st.tabs(["🔮 Predicții Meciuri", "🧪 Backtesting Model"])
 
@@ -252,6 +255,15 @@ with tab_predict:
             c2.metric("X (Egal)", f"{prob_draw*100:.1f}%", f"Cotă Reală: {1/prob_draw:.2f}")
             c3.metric("2 (Victorie Oaspeți)", f"{prob_away*100:.1f}%", f"Cotă Reală: {1/prob_away:.2f}")
 
+            # Calcul Pariu Recomandat
+            p_over25 = sum(matrix[x, y] for x in range(12) for y in range(12) if x + y > 2.5)
+            p_btts_yes = np.sum(matrix[1:, 1:])
+            rec_bet_name, rec_prob, rec_odds = get_recommended_bet(prob_home, prob_draw, prob_away, p_over25, p_btts_yes, home_matched, away_matched)
+
+            st.divider()
+            st.subheader("💡 Pariu Recomandat de Model")
+            st.info(f"🎯 **Pariu Optim:** `{rec_bet_name}` | **Probabilitate:** `{rec_prob*100:.1f}%` | **Cotă Minimă Valoroasă:** `{rec_odds:.2f}`")
+
             st.divider()
             st.subheader("🎯 Piețe Extinse de Pariere")
 
@@ -270,7 +282,6 @@ with tab_predict:
                     col_u.write(f"**{line}**: Sub = `{p_under*100:.1f}%` (Cotă: `{1/p_under:.2f}`)")
 
             with t2:
-                p_btts_yes = np.sum(matrix[1:, 1:])
                 p_btts_no = 1.0 - p_btts_yes
 
                 p_1x = prob_home + prob_draw
