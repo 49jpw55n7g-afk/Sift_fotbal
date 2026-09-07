@@ -1,20 +1,18 @@
 import math
-import re
-import unicodedata
 import requests
 import numpy as np
 import pandas as pd
 import streamlit as st
 
 from scipy.stats import poisson
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 # ============================================================
-# CONFIGURARE PAGINĂ STREAMLIT
+# 1. CONFIGURARE PAGINĂ STREAMLIT
 # ============================================================
 
 st.set_page_config(
-    page_title="Auto Football Value Betting Engine V4",
+    page_title="Quantitative Football Analytics Engine V4",
     page_icon="⚽",
     layout="wide"
 )
@@ -28,7 +26,7 @@ MIN_EDGE = 0.04
 MIN_EV = 0.05
 
 # ============================================================
-# UTILS & MATEMATICĂ
+# 2. UTILS & MATEMATICĂ
 # ============================================================
 
 def clamp(x, low, high):
@@ -51,7 +49,7 @@ def calculate_ev(prob, odds):
     return (prob * (odds - 1.0)) - (1.0 - prob)
 
 # ============================================================
-# PONDERARE TEMPORALĂ & ENGINE V4
+# 3. PONDERARE TEMPORALĂ & ENGINE V4 (DIXON-COLES)
 # ============================================================
 
 def get_temporal_weight(match_date, ref_date=None):
@@ -218,132 +216,157 @@ def extract_markets_from_matrix(matrix):
     return markets
 
 # ============================================================
-# INCARCARE AUTOMATĂ MATEI & COTE REALTIME / API
+# 4. PRELUARE AUTOMATĂ MECIURI DINA API SAU MOCK
 # ============================================================
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=900)
 def fetch_upcoming_and_historical_matches(api_key=""):
-    """
-    Încarcă meciurile zilei + istoricul recent folosind API-ul Football-Data.org.
-    Dacă nu există cheie API introduse, folosește un feed demonstrativ automat.
-    """
-    if not api_key:
-        # Feed automat demonstrativ cu meciurile zilei curent
-        today = datetime.now().strftime("%Y-%m-%d")
-        
-        historical = [
-            {"home": "Arsenal", "away": "Chelsea", "score_home": 2, "score_away": 1, "completed": True, "date": "2026-08-10"},
-            {"home": "Liverpool", "away": "Man City", "score_home": 1, "score_away": 1, "completed": True, "date": "2026-08-12"},
-            {"home": "Man United", "away": "Arsenal", "score_home": 0, "score_away": 2, "completed": True, "date": "2026-08-15"},
-            {"home": "Chelsea", "away": "Tottenham", "score_home": 3, "score_away": 2, "completed": True, "date": "2026-08-20"},
-            {"home": "Man City", "away": "Arsenal", "score_home": 2, "score_away": 2, "completed": True, "date": "2026-08-25"},
-            {"home": "Barcelona", "away": "Real Madrid", "score_home": 1, "score_away": 2, "completed": True, "date": "2026-08-18"},
-            {"home": "Atletico", "away": "Barcelona", "score_home": 0, "score_away": 1, "completed": True, "date": "2026-08-22"}
-        ]
-        
+    today_dt = datetime.now(timezone.utc)
+    today_str = today_dt.strftime("%Y-%m-%d")
+    
+    historical = [
+        {"home": "Arsenal", "away": "Chelsea", "score_home": 2, "score_away": 1, "completed": True, "date": "2026-08-10"},
+        {"home": "Liverpool", "away": "Man City", "score_home": 1, "score_away": 1, "completed": True, "date": "2026-08-12"},
+        {"home": "Man United", "away": "Arsenal", "score_home": 0, "score_away": 2, "completed": True, "date": "2026-08-15"},
+        {"home": "Chelsea", "away": "Tottenham", "score_home": 3, "score_away": 2, "completed": True, "date": "2026-08-20"},
+        {"home": "Man City", "away": "Arsenal", "score_home": 2, "score_away": 2, "completed": True, "date": "2026-08-25"},
+        {"home": "Barcelona", "away": "Real Madrid", "score_home": 1, "score_away": 2, "completed": True, "date": "2026-08-18"},
+        {"home": "Atletico", "away": "Barcelona", "score_home": 0, "score_away": 1, "completed": True, "date": "2026-08-22"}
+    ]
+
+    if not api_key or len(api_key.strip()) < 10:
         upcoming = [
             {
-                "id": 101, "league": "Premier League", "home": "Arsenal", "away": "Man City", "date": today,
+                "id": 101, "league": "Premier League", "home": "Arsenal", "away": "Man City", "date": today_str,
                 "odds": {"1": 2.65, "X": 3.40, "2": 2.70, "OVER_2.5": 1.95, "BTTS_YES": 1.75}
             },
             {
-                "id": 102, "league": "Premier League", "home": "Chelsea", "away": "Liverpool", "date": today,
+                "id": 102, "league": "Premier League", "home": "Chelsea", "away": "Liverpool", "date": today_str,
                 "odds": {"1": 3.10, "X": 3.50, "2": 2.25, "OVER_2.5": 1.70, "BTTS_YES": 1.60}
             },
             {
-                "id": 103, "league": "La Liga", "home": "Barcelona", "away": "Atletico", "date": today,
+                "id": 103, "league": "La Liga", "home": "Barcelona", "away": "Atletico", "date": today_str,
                 "odds": {"1": 1.90, "X": 3.60, "2": 4.20, "OVER_2.5": 1.85, "BTTS_YES": 1.80}
             }
         ]
         return historical, upcoming
 
-    # Conexiune API Football-Data.org (când cheia e introdusă)
-    headers = {'X-Auth-Token': api_key}
-    url_upcoming = "https://api.football-data.org/v4/matches"
+    headers = {'X-Auth-Token': api_key.strip()}
+    date_from = (today_dt - timedelta(days=1)).strftime("%Y-%m-%d")
+    date_to = (today_dt + timedelta(days=2)).strftime("%Y-%m-%d")
+    
+    url = f"https://api.football-data.org/v4/matches?dateFrom={date_from}&dateTo={date_to}"
     
     try:
-        res = requests.get(url_upcoming, headers=headers).json()
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        if response.status_code == 403:
+            st.error("🔑 Cheia API este invalidă sau neactivată. Verifică contul pe Football-Data.org.")
+            return historical, []
+        elif response.status_code == 429:
+            st.warning("⚠️ Ai depășit limita gratuită de 10 apeluri/minut ale API-ului. Așteaptă 60 de secunde.")
+            return historical, []
+        elif response.status_code != 200:
+            st.error(f"Eroare API Football-Data (Cod HTTP {response.status_code})")
+            return historical, []
+
+        res = response.json()
+        raw_matches = res.get("matches", [])
+        
+        if not raw_matches:
+            st.info(f"Nu au fost găsite meciuri programate în ligile gratuite în intervalul {date_from} — {date_to}.")
+            return historical, []
+
         upcoming = []
-        for m in res.get("matches", []):
+        for m in raw_matches:
+            home_name = m.get("homeTeam", {}).get("name", "Gazde")
+            away_name = m.get("awayTeam", {}).get("name", "Oaspeți")
+            competition = m.get("competition", {}).get("name", "Fotbal")
+            match_date = m.get("utcDate", today_str)[:10]
+
             upcoming.append({
-                "id": m["id"],
-                "league": m["competition"]["name"],
-                "home": m["homeTeam"]["name"],
-                "away": m["awayTeam"]["name"],
-                "date": m["utcDate"][:10],
-                "odds": {"1": 2.10, "X": 3.30, "2": 3.60, "OVER_2.5": 1.90} # Cote estimate de sistem
+                "id": m.get("id"),
+                "league": competition,
+                "home": home_name,
+                "away": away_name,
+                "date": match_date,
+                "odds": {"1": 2.10, "X": 3.30, "2": 3.50, "OVER_2.5": 1.90, "BTTS_YES": 1.80}
             })
-        return [], upcoming
+
+        return historical, upcoming
+
     except Exception as e:
-        st.error(f"Eroare conectare API: {e}")
-        return [], []
+        st.error(f"Eroare rețea: {e}")
+        return historical, []
 
 # ============================================================
-# INTERFAȚĂ STREAMLIT (UI) - AUTOMATĂ
+# 5. INTERFAȚĂ STREAMLIT (UI)
 # ============================================================
 
-st.title("⚽ Meciurile Zilei — Recomandări Value Bet Automate")
-st.caption("Filtru automat bazat pe modelul Dixon-Coles V4, xG real și Expected Value (EV)")
+st.title("⚽ Quantitative Football Analytics Engine V4")
+st.caption("Auto Value Bet Identification Engine | Dixon-Coles V4")
 
-# Sidebar opțional pentru cheie API
 api_key = st.sidebar.text_input("Cheie API Football-Data.org (Opțional)", type="password")
 historical_matches, upcoming_matches = fetch_upcoming_and_historical_matches(api_key)
 
 db, avg_home, avg_away = build_real_team_database(historical_matches)
 
 if not upcoming_matches:
-    st.warning("Nu există meciuri programate pentru astăzi sau nu s-au putut prelua datele.")
+    st.warning("Nu există meciuri disponibile pentru procesare.")
 else:
-    st.subheader(f"📅 Program Zilei ({len(upcoming_matches)} Meciuri Analizate Automate)")
+    st.subheader(f"📅 Program Meciuri Analizate Automate ({len(upcoming_matches)})")
     
-    value_bets_found = 0
-    
-    for match in upcoming_matches:
+    total_value_bets = 0
+
+    for idx, match in enumerate(upcoming_matches):
         home = match["home"]
         away = match["away"]
         league = match["league"]
-        odds_dict = match.get("odds", {})
+        match_date = match["date"]
 
-        # Daca echipele sunt noi, se folosesc valorile medii ale ligii
         l_h, l_a = calculate_expected_goals(home, away, db, avg_home, avg_away)
         matrix = build_dixon_coles_matrix(l_h, l_a)
         markets = extract_markets_from_matrix(matrix)
 
-        # Evaluare automată Value Bet
-        match_value_bets = []
-        for market_key, odds in odds_dict.items():
-            if market_key in markets:
-                prob = markets[market_key]
-                imp_prob = implied_probability(odds)
-                ev = calculate_ev(prob, odds)
-                edge = prob - imp_prob if imp_prob else 0
+        with st.expander(f"🏆 {league} | {home} vs {away} ({match_date}) — xG: {l_h:.2f} - {l_a:.2f}"):
+            st.markdown("##### ⚙️ Ajustare Cote Bookmaker")
+            c1, c2, c3, c4 = st.columns(4)
+            
+            with c1:
+                o1 = st.number_input(f"Cotă 1", value=match["odds"].get("1", 2.10), key=f"o1_{idx}_{match['id']}")
+            with c2:
+                ox = st.number_input(f"Cotă X", value=match["odds"].get("X", 3.30), key=f"ox_{idx}_{match['id']}")
+            with c3:
+                o2 = st.number_input(f"Cotă 2", value=match["odds"].get("2", 3.50), key=f"o2_{idx}_{match['id']}")
+            with c4:
+                o_over = st.number_input(f"Cotă Over 2.5", value=match["odds"].get("OVER_2.5", 1.90), key=f"oover_{idx}_{match['id']}")
 
-                if (edge >= MIN_EDGE) and (ev >= MIN_EV):
-                    match_value_bets.append({
-                        "Piață": market_key,
-                        "Prob. Model": f"{prob * 100:.1f}%",
-                        "Cotă Corectă": f"{fair_odds(prob):.2f}",
-                        "Cotă Bookie": f"{odds:.2f}",
-                        "Edge": f"{edge * 100:+.1f}%",
-                        "EV": f"{ev * 100:+.1f}%"
-                    })
+            current_odds = {"1": o1, "X": ox, "2": o2, "OVER_2.5": o_over}
 
-        # Afișare meci
-        with st.expander(f"🏆 {league} | {home} vs {away} — xG Estimat: {l_h:.2f} - {l_a:.2f}", expanded=bool(match_value_bets)):
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.write(f"**Probabilitate 1:** {markets['1']*100:.1f}%")
-            with col2:
-                st.write(f"**Probabilitate X:** {markets['X']*100:.1f}%")
-            with col3:
-                st.write(f"**Probabilitate 2:** {markets['2']*100:.1f}%")
+            match_value_bets = []
+            for m_key, odds in current_odds.items():
+                if m_key in markets:
+                    prob = markets[m_key]
+                    imp_prob = implied_probability(odds)
+                    ev = calculate_ev(prob, odds)
+                    edge = prob - imp_prob if imp_prob else 0
+
+                    if (edge >= MIN_EDGE) and (ev >= MIN_EV):
+                        match_value_bets.append({
+                            "Piață": m_key,
+                            "Prob. Model": f"{prob * 100:.1f}%",
+                            "Cotă Fair": f"{fair_odds(prob):.2f}",
+                            "Cotă Bookie": f"{odds:.2f}",
+                            "Edge": f"{edge * 100:+.1f}%",
+                            "EV": f"{ev * 100:+.1f}%"
+                        })
 
             if match_value_bets:
-                value_bets_found += len(match_value_bets)
+                total_value_bets += len(match_value_bets)
                 st.success("🟢 VALUE BET IDENTIFICAT!")
                 st.dataframe(pd.DataFrame(match_value_bets), use_container_width=True)
             else:
-                st.info("🔴 PASS — Nu există nicio cotă cu valoare matematică (+EV suficient).")
+                st.info("🔴 PASS — Fără valoare matematică (+EV) identificată.")
 
     st.sidebar.markdown("---")
-    st.sidebar.metric("Total Value Bets Găsite", value_bets_found)
+    st.sidebar.metric("Total Value Bets Găsite", total_value_bets)
