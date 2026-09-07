@@ -8,24 +8,24 @@ from scipy.stats import poisson
 
 st.set_page_config(page_title="Predicții xG Meciuri", page_icon="⚽", layout="wide")
 
-st.title("⚽ Predicții Automate xG - Meciurile Zilei")
+st.title("⚽ Predicții Automate xG - Meciuri & Analiză")
 
 LEAGUES = {
-    "🇷🇴 Superliga (România)": "ROU_1",
     "🇮🇹 Serie A (Italia)": "Serie_A",
     "🏴󠁧󠁢󠁥󠁮󠁧󠁿 Premier League (Anglia)": "EPL",
     "🇪🇸 La Liga (Spania)": "La_Liga",
     "🇩🇪 Bundesliga (Germania)": "Bundesliga",
-    "🇫🇷 Ligue 1 (Franța)": "Ligue_1"
+    "🇫🇷 Ligue 1 (Franța)": "Ligue_1",
+    "🇷🇴 Superliga (România)": "ROU_1"
 }
 
-# Program static / mock meciuri curente pentru Superliga (România)
+# Program / Meciuri pentru Superliga (România)
 ROMANIA_FIXTURES = [
-    {"h": "FCSB", "a": "Dinamo București", "time": "Azi, 20:30"},
-    {"h": "CFR Cluj", "a": "FC Botoșani", "time": "Azi, 18:00"},
-    {"h": "Rapid București", "a": "Universitatea Craiova", "time": "Mâine, 20:00"},
-    {"h": "Farul Constanța", "a": "U Cluj", "time": "Mâine, 17:30"},
-    {"h": "Sepsi OSK", "a": "UTA Arad", "time": "Peste 2 zile"}
+    {"h": "FCSB", "a": "Dinamo București", "time": "Etapa Curentă - 20:30"},
+    {"h": "CFR Cluj", "a": "FC Botoșani", "time": "Etapa Curentă - 18:00"},
+    {"h": "Rapid București", "a": "Universitatea Craiova", "time": "Etapa Curentă - 20:00"},
+    {"h": "Farul Constanța", "a": "U Cluj", "time": "Etapa Curentă - 17:30"},
+    {"h": "Sepsi OSK", "a": "UTA Arad", "time": "Etapa Curentă - 19:00"}
 ]
 
 ROMANIA_TEAMS = {
@@ -37,14 +37,8 @@ ROMANIA_TEAMS = {
     "Sepsi OSK": {"avg_xg_scored": 1.25, "avg_xg_conceded": 1.20},
     "UTA Arad": {"avg_xg_scored": 1.15, "avg_xg_conceded": 1.35},
     "U Cluj": {"avg_xg_scored": 1.20, "avg_xg_conceded": 1.15},
-    "Oțelul Galați": {"avg_xg_scored": 1.10, "avg_xg_conceded": 1.05},
-    "Petrolul Ploiești": {"avg_xg_scored": 1.05, "avg_xg_conceded": 1.25},
     "Dinamo București": {"avg_xg_scored": 1.20, "avg_xg_conceded": 1.30},
-    "FC Hermannstadt": {"avg_xg_scored": 1.15, "avg_xg_conceded": 1.25},
-    "FC Botoșani": {"avg_xg_scored": 1.00, "avg_xg_conceded": 1.45},
-    "Unirea Slobozia": {"avg_xg_scored": 0.95, "avg_xg_conceded": 1.40},
-    "Gloria Buzău": {"avg_xg_scored": 0.90, "avg_xg_conceded": 1.50},
-    "Politehnica Iași": {"avg_xg_scored": 1.00, "avg_xg_conceded": 1.40}
+    "FC Botoșani": {"avg_xg_scored": 1.00, "avg_xg_conceded": 1.45}
 }
 
 @st.cache_data(ttl=1800)
@@ -53,7 +47,7 @@ def get_league_data(league_code):
         return "LOCAL", ROMANIA_FIXTURES
 
     url = f"https://understat.com/league/{league_code}"
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     try:
         response = requests.get(url, headers=headers, timeout=10)
         teams_match = re.search(r"teamsData\s*=\s*JSON\.parse\('([^']+)'\)", response.text)
@@ -132,7 +126,9 @@ with col_l:
     if teams_data:
         stats, league_avg = calculate_team_stats(teams_data)
         
-        st.subheader("📌 Selectează Meciul")
+        st.subheader("📌 Meciuri Disponibile")
+        
+        match_type = st.radio("Tip Meciuri:", ["Programate / Viitoare", "Rezultate Recente / Analiză"], index=0)
         
         match_options = []
         parsed_matches = []
@@ -142,27 +138,32 @@ with col_l:
                 match_options.append(f"{m['h']} vs {m['a']} ({m['time']})")
                 parsed_matches.append((m['h'], m['a']))
         elif dates_data:
-            # Luăm meciurile nejucate
-            upcoming = [m for m in dates_data if m.get('isResult') == False]
-            if not upcoming:
-                upcoming = dates_data[-10:] # Fallback ultimele meciuri
-                
-            for m in upcoming:
-                dt = m.get('datetime', '')[:16].replace(' ', ' ora ')
-                match_options.append(f"{m['h']['title']} vs {m['a']['title']} ({dt})")
+            if match_type == "Programate / Viitoare":
+                matches_list = [m for m in dates_data if m.get('isResult') == False]
+                if not matches_list:
+                    st.warning("Nu există meciuri programate în ultimele 24-48h (pauză competițională/etapă finalizată). Se afișează meciurile următoare disponibile:")
+                    matches_list = dates_data[-10:]
+            else:
+                matches_list = [m for m in dates_data if m.get('isResult') == True][-15:]
+                matches_list.reverse()
+
+            for m in matches_list:
+                dt = m.get('datetime', '')[:16].replace(' ', ' - ')
+                match_options.append(f"{m['h']['title']} vs {m['a']['title']} [{dt}]")
                 parsed_matches.append((m['h']['title'], m['a']['title']))
 
         if match_options:
-            selected_match_str = st.selectbox("Meciuri Programate:", match_options)
+            selected_match_str = st.selectbox("Selectează Meciul:", match_options)
             idx = match_options.index(selected_match_str)
             home_team, away_team = parsed_matches[idx]
         else:
+            st.info("Puteți selecta echipele manual de mai jos:")
             team_list = sorted(list(stats.keys()))
             home_team = st.selectbox("Echipa Gazdă:", team_list, index=0)
             away_team = st.selectbox("Echipa Oaspete:", team_list, index=min(1, len(team_list)-1))
 
 with col_m:
-    if teams_data and stats and home_team != away_team:
+    if teams_data and stats and 'home_team' in locals() and home_team != away_team:
         exp_home, exp_away, p_home, p_draw, p_away, matrix = calculate_match_probabilities(
             home_team, away_team, stats, league_avg
         )
@@ -179,7 +180,7 @@ with col_m:
         col_x.metric("X (Egal)", f"{p_draw*100:.1f}%", f"Cotă Reală: {1/p_draw:.2f}" if p_draw > 0 else "")
         col_2.metric("2 (Oaspeți)", f"{p_away*100:.1f}%", f"Cotă Reală: {1/p_away:.2f}" if p_away > 0 else "")
         
-        st.subheader("⚽ Goluri Totale (Peste/Sub)")
+        st.subheader("⚽ Goluri Totale (Peste/Sub 2.5)")
         over_25_prob = 1 - sum(matrix[i, j] for i in range(3) for j in range(3) if i + j <= 2)
         under_25_prob = 1 - over_25_prob
         
