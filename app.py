@@ -1,6 +1,7 @@
 import json
 import re
 import math
+from datetime import datetime
 import requests
 import streamlit as st
 import numpy as np
@@ -8,20 +9,19 @@ from scipy.stats import poisson
 
 st.set_page_config(page_title="Predicții xG Meciuri", page_icon="⚽", layout="wide")
 
-st.title("⚽ Predicții Automate xG - Top Ligi & Superliga România")
-st.markdown("Selectează liga și meciul dorit pentru a calcula cotele reale și probabilitățile.")
+st.title("⚽ Predicții Automate xG - Meciurile Zilei & Runda Curentă")
+st.markdown("Aplicația identifică automat meciurile din runda curentă/ziua de azi și calculează probabilitățile de pariere.")
 
-# Mapare ligi
+# Mapare Ligi
 LEAGUES = {
-    "🇷🇴 Superliga (România)": "ROU_1",
     "🇮🇹 Serie A (Italia)": "Serie_A",
     "🏴󠁧󠁢󠁥󠁮󠁧󠁿 Premier League (Anglia)": "EPL",
     "🇪🇸 La Liga (Spania)": "La_Liga",
     "🇩🇪 Bundesliga (Germania)": "Bundesliga",
-    "🇫🇷 Ligue 1 (Franța)": "Ligue_1"
+    "🇫🇷 Ligue 1 (Franța)": "Ligue_1",
+    "🇷🇴 Superliga (România)": "ROU_1"
 }
 
-# Date implicite xG pentru echipele din Superliga România
 ROMANIA_TEAMS = {
     "FCSB": {"avg_xg_scored": 1.65, "avg_xg_conceded": 1.10},
     "CFR Cluj": {"avg_xg_scored": 1.55, "avg_xg_conceded": 1.05},
@@ -41,13 +41,13 @@ ROMANIA_TEAMS = {
     "Politehnica Iași": {"avg_xg_scored": 1.00, "avg_xg_conceded": 1.40}
 }
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=1800)
 def get_league_data(league_code):
     if league_code == "ROU_1":
         return "LOCAL", None
 
     url = f"https://understat.com/league/{league_code}"
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     try:
         response = requests.get(url, headers=headers, timeout=10)
         teams_match = re.search(r"teamsData\s*=\s*JSON\.parse\('([^']+)'\)", response.text)
@@ -65,8 +65,7 @@ def get_league_data(league_code):
 
 def calculate_team_stats(teams_data):
     if teams_data == "LOCAL":
-        league_avg_xg = 1.25
-        return ROMANIA_TEAMS, league_avg_xg
+        return ROMANIA_TEAMS, 1.25
 
     stats = {}
     total_xg_scored, total_xg_conceded, total_games = 0, 0, 0
@@ -127,14 +126,25 @@ with col_l:
     if teams_data:
         stats, league_avg = calculate_team_stats(teams_data)
         
-        st.subheader("📌 Configurare Meci")
+        st.subheader("📌 Meciuri Disponibile")
         
-        upcoming_matches = [m for m in dates_data if m.get('isResult') == False] if dates_data else []
+        upcoming_matches = []
+        if dates_data:
+            # Preluăm meciurile din runda curentă / cele care urmează să se joace
+            upcoming_matches = [m for m in dates_data if m.get('isResult') == False]
+            if not upcoming_matches:
+                # Dacă runda s-a terminat, arată ultimele 10 meciuri recente din ligă
+                upcoming_matches = dates_data[-10:]
         
-        if upcoming_matches:
-            match_options = [f"{m['h']['title']} vs {m['a']['title']} ({m['datetime'][:10]})" for m in upcoming_matches]
-            selected_match_str = st.selectbox("Meciuri Programate:", match_options)
-            
+        match_mode = st.radio("Sursă Meci:", ["Meciuri Programate/Rundă Curentă", "Selecție Manuală Echipe"])
+        
+        if match_mode == "Meciuri Programate/Rundă Curentă" and upcoming_matches:
+            match_options = []
+            for m in upcoming_matches:
+                dt = m.get('datetime', '')[:16].replace(' ', ' ora ')
+                match_options.append(f"{m['h']['title']} vs {m['a']['title']} ({dt})")
+                
+            selected_match_str = st.selectbox("Selectează meciul:", match_options)
             idx = match_options.index(selected_match_str)
             match_info = upcoming_matches[idx]
             home_team = match_info['h']['title']
@@ -158,9 +168,9 @@ with col_m:
         
         st.subheader("📊 Probabilități Rezultat Final (1X2)")
         col_1, col_x, col_2 = st.columns(3)
-        col_1.metric("1 (Gazde)", f"{p_home*100:.1f}%", f"Cotă Reala: {1/p_home:.2f}" if p_home > 0 else "")
-        col_x.metric("X (Egal)", f"{p_draw*100:.1f}%", f"Cotă Reala: {1/p_draw:.2f}" if p_draw > 0 else "")
-        col_2.metric("2 (Oaspeți)", f"{p_away*100:.1f}%", f"Cotă Reala: {1/p_away:.2f}" if p_away > 0 else "")
+        col_1.metric("1 (Gazde)", f"{p_home*100:.1f}%", f"Cotă Reală: {1/p_home:.2f}" if p_home > 0 else "")
+        col_x.metric("X (Egal)", f"{p_draw*100:.1f}%", f"Cotă Reală: {1/p_draw:.2f}" if p_draw > 0 else "")
+        col_2.metric("2 (Oaspeți)", f"{p_away*100:.1f}%", f"Cotă Reală: {1/p_away:.2f}" if p_away > 0 else "")
         
         st.subheader("⚽ Goluri Totale (Peste/Sub)")
         over_25_prob = 1 - sum(matrix[i, j] for i in range(3) for j in range(3) if i + j <= 2)
@@ -169,3 +179,14 @@ with col_m:
         g1, g2 = st.columns(2)
         g1.metric("Peste 2.5 Goluri", f"{over_25_prob*100:.1f}%", f"Cotă: {1/over_25_prob:.2f}" if over_25_prob > 0 else "")
         g2.metric("Sub 2.5 Goluri", f"{under_25_prob*100:.1f}%", f"Cotă: {1/under_25_prob:.2f}" if under_25_prob > 0 else "")
+        
+        st.subheader("🎯 Cele mai probabile Scoruri Corecte")
+        scores = []
+        for i in range(5):
+            for j in range(5):
+                scores.append(((i, j), matrix[i, j]))
+        scores.sort(key=lambda x: x[1], reverse=True)
+        
+        cols = st.columns(5)
+        for idx, (sc, prob) in enumerate(scores[:5]):
+            cols[idx].metric(f"Scor {sc[0]}-{sc[1]}", f"{prob*100:.1f}%", f"Cotă: {1/prob:.2f}" if prob > 0 else "")
