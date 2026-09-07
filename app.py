@@ -6,16 +6,17 @@ import numpy as np
 import requests
 from scipy.stats import poisson
 from understatapi import UnderstatClient
+import streamlit as st
 
 # ==========================================
 # CONFIGURARE MEDIU & NIVELE DE SIGURANȚĂ
 # ==========================================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")  # Cheia ta de la The-Odds-API (Opțional)
+ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
 
-KELLY_FRACTION = 0.25  # Fractional Kelly 25% (Protecție împotriva volatilității)
-MIN_VALUE_MARGIN = 0.03  # Minim +3% EV pentru a fi considerat Value Bet
+KELLY_FRACTION = 0.25
+MIN_VALUE_MARGIN = 0.03
 
 
 # ==========================================
@@ -35,7 +36,6 @@ def dixon_coles_tau(x: int, y: int, lambda_h: float, mu_a: float, rho: float = -
 
 
 def calculate_kelly_stake(probability: float, bookmaker_odds: float, kelly_fraction: float = KELLY_FRACTION) -> float:
-    """Calcul miza optimă folosind Criteriul Fractional Kelly (% din bancă)."""
     b = bookmaker_odds - 1.0
     q = 1.0 - probability
     f_star = (b * probability - q) / b
@@ -44,7 +44,7 @@ def calculate_kelly_stake(probability: float, bookmaker_odds: float, kelly_fract
         return 0.0
     
     recommended_percentage = f_star * kelly_fraction * 100
-    return round(min(recommended_percentage, 5.0), 2)  # Cap de siguranță la max 5% din bancă
+    return round(min(recommended_percentage, 5.0), 2)
 
 
 def analyze_match_pro(
@@ -135,26 +135,23 @@ def analyze_match_pro(
 
 
 # ==========================================
-# 2. PRELUARE DATE XG (EXPONENTIAL DECAY & HOME/AWAY SPLIT)
+# 2. PRELUARE DATE XG
 # ==========================================
 def fetch_weighted_team_xg(season: int, team_name: str, is_home: bool, last_n: int = 5):
-    """Preluare xG din Understat cu ponderare exponențială și filtrare pe meciuri acasă/deplasare."""
     understat = UnderstatClient()
     try:
         results = understat.get_team_results(team_name=team_name, season=season)
         played = [m for m in results if m.get('xG') is not None]
         
-        # Filtrare strictă pe locație (Acasă sau Deplasare)
         location_matches = [
             m for m in played 
             if (m['h']['title'] == team_name if is_home else m['a']['title'] == team_name)
         ][-last_n:]
 
         if not location_matches:
-            # Fallback pe ultimele meciuri generale dacă nu există suficiente meciuri pe locație
             location_matches = played[-last_n:]
 
-        weights = [math.exp(i * 0.3) for i in range(len(location_matches))]  # Ponderare exponențială
+        weights = [math.exp(i * 0.3) for i in range(len(location_matches))]
         total_weight = sum(weights)
 
         scored_weighted = 0.0
@@ -179,27 +176,6 @@ def fetch_weighted_team_xg(season: int, team_name: str, is_home: bool, last_n: i
         return None
 
 
-# ==========================================
-# 3. INTEGRARE THE-ODDS-API (COTE LIVE)
-# ==========================================
-def fetch_live_odds(sport_key: str = "soccer_epl", region: str = "eu") -> dict:
-    """Preia cotele reale directe de la casele de pariuri dacă există API Key."""
-    if not ODDS_API_KEY:
-        return {}
-    
-    url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds/?apiKey={ODDS_API_KEY}&regions={region}&markets=h2h,totals"
-    try:
-        res = requests.get(url, timeout=10)
-        res.raise_for_status()
-        return res.json()
-    except Exception as e:
-        print(f"Eroare preluare cote The-Odds-API: {e}")
-        return {}
-
-
-# ==========================================
-# 4. TRIMITERE TELEGRAM & STOCARE CSV
-# ==========================================
 def send_telegram_alert(message: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("Telegram netrimis: Lipsă Token sau Chat ID.")
@@ -241,20 +217,17 @@ def save_value_bets_to_csv(home_team: str, away_team: str, analysis: dict, filep
                 vb["Cota Reala"],
                 vb["EV (Margine Profit)"],
                 vb["Miza Recomandata Kelly"],
-                "PENDING",  # Va fi actualizat de scriptul de auto-resolver
+                "PENDING",
                 0.0
             ])
 
 
-# ==========================================
-# 5. EXECUȚIE SCANER
-# ==========================================
 def run_full_scanner(season: int, home_team: str, away_team: str, bookmaker_odds: dict):
     home_stats = fetch_weighted_team_xg(season, home_team, is_home=True)
     away_stats = fetch_weighted_team_xg(season, away_team, is_home=False)
 
     if not home_stats or not away_stats:
-        return
+        return None
 
     analysis = analyze_match_pro(
         home_xg_attack=home_stats['avg_xg_attack'],
@@ -268,7 +241,6 @@ def run_full_scanner(season: int, home_team: str, away_team: str, bookmaker_odds
     if value_bets:
         save_value_bets_to_csv(home_team, away_team, analysis)
         
-        # Construire mesaj Telegram
         msg = f"🚨 *VALUE BET DETECTAT (+EV)* 🚨\n\n"
         msg += f"⚽ *Meci:* {home_team} vs {away_team}\n"
         msg += f"📊 *xG Modelat:* {analysis['xG Modelat (Gazde - Oaspeti)']}\n\n"
@@ -279,13 +251,48 @@ def run_full_scanner(season: int, home_team: str, away_team: str, bookmaker_odds
             msg += f"  - Miză Recomandată: *{vb['Miza Recomandata Kelly']}*\n\n"
             
         send_telegram_alert(msg)
+        
+    return analysis
 
 
-if __name__ == "__main__":
-    # Testare scanare
-    odds_test = {
-        "1 Solist": 2.25,
-        "Peste 2.5 Goluri": 1.95,
-        "Ambele Marcheaza (GG)": 1.85
-    }
-    run_full_scanner(season=2025, home_team="Arsenal", away_team="Chelsea", bookmaker_odds=odds_test)
+# ==========================================
+# 3. INTERFAȚĂ VIZUALĂ STREAMLIT
+# ==========================================
+st.set_page_config(page_title="Value Bet Scanner", page_icon="⚽", layout="wide")
+st.title("⚽ Value Bet & xG Model Scanner")
+
+st.sidebar.header("Parametri Meci")
+season = st.sidebar.number_input("Sezon", value=2024)
+home_team = st.sidebar.text_input("Echipă Gazdă", value="Arsenal")
+away_team = st.sidebar.text_input("Echipă Oaspete", value="Chelsea")
+
+st.sidebar.subheader("Cote Casă (Bookmaker)")
+odd_1 = st.sidebar.number_input("Cotă 1 Solist", value=2.25)
+odd_over = st.sidebar.number_input("Cotă Peste 2.5", value=1.95)
+odd_btts = st.sidebar.number_input("Cotă GG", value=1.85)
+
+if st.button("🚀 Analizează Meciul Acum"):
+    with st.spinner("Se preiau datele xG și se calculează modelul Dixon-Coles..."):
+        odds_dict = {
+            "1 Solist": odd_1,
+            "Peste 2.5 Goluri": odd_over,
+            "Ambele Marcheaza (GG)": odd_btts
+        }
+        res = run_full_scanner(season=season, home_team=home_team, away_team=away_team, bookmaker_odds=odds_dict)
+        
+        if res:
+            st.success("Analiză finalizată!")
+            st.write(f"### xG Modelat: {res['xG Modelat (Gazde - Oaspeti)']}")
+            st.write(f"**Cea mai sigură alegere:** {res['Cea mai sigura alegere']} ({res['Probabilitate estimata']})")
+            
+            vb = res.get("Value Bets Detectate (+EV)", [])
+            if vb:
+                st.subheader("🔥 Value Bets Detectate (+EV)")
+                st.table(vb)
+            else:
+                st.info("Nu au fost găsite Value Bets (+EV) pentru cotele introduse.")
+                
+            st.subheader("📊 Probabilități Calculate & Cote Reale")
+            st.json(res["Toate Probabilitatile"])
+        else:
+            st.error("Nu s-au putut prelua datele pentru echipele introduse.")
