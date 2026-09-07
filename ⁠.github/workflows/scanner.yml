@@ -2,7 +2,7 @@ name: Full Automatic Value Bet System
 
 on:
   schedule:
-    - cron: '0 */6 * * *'  # Rulează la fiecare 6 ore
+    - cron: '0 */6 * * *'
   workflow_dispatch:
 
 permissions:
@@ -31,7 +31,7 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
-        run: python main.py
+        run: python app.py
 
       - name: Resolve Past Match Results & Calculate ROI
         run: python resolve_results.py
