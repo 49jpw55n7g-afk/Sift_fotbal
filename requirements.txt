@@ -1,6 +1,5 @@
+streamlit
 numpy
 scipy
 requests
 understatapi
-understat
-streamlit
