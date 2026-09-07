@@ -3,3 +3,4 @@ scipy
 requests
 understatapi
 understat
+streamlit
