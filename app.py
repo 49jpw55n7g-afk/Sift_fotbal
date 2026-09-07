@@ -5,7 +5,7 @@ import pandas as pd
 import streamlit as st
 
 from scipy.stats import poisson
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 # ============================================================
 # 1. CONFIGURARE PAGINĂ STREAMLIT
@@ -216,7 +216,7 @@ def extract_markets_from_matrix(matrix):
     return markets
 
 # ============================================================
-# 4. PRELUARE AUTOMATĂ MECIURI DINA API SAU MOCK
+# 4. PRELUARE AUTOMATĂ MECIURI DIN API SAU MOCK
 # ============================================================
 
 @st.cache_data(ttl=900)
@@ -252,19 +252,21 @@ def fetch_upcoming_and_historical_matches(api_key=""):
         return historical, upcoming
 
     headers = {'X-Auth-Token': api_key.strip()}
-    date_from = (today_dt - timedelta(days=1)).strftime("%Y-%m-%d")
-    date_to = (today_dt + timedelta(days=2)).strftime("%Y-%m-%d")
-    
-    url = f"https://api.football-data.org/v4/matches?dateFrom={date_from}&dateTo={date_to}"
+    url = "https://api.football-data.org/v4/matches"
     
     try:
         response = requests.get(url, headers=headers, timeout=10)
         
+        # Fallback dacă endpoint-ul general dă Bad Request (HTTP 400) pe cont gratuit
+        if response.status_code == 400:
+            url_fallback = "https://api.football-data.org/v4/competitions/PL/matches?status=SCHEDULED"
+            response = requests.get(url_fallback, headers=headers, timeout=10)
+
         if response.status_code == 403:
             st.error("🔑 Cheia API este invalidă sau neactivată. Verifică contul pe Football-Data.org.")
             return historical, []
         elif response.status_code == 429:
-            st.warning("⚠️ Ai depășit limita gratuită de 10 apeluri/minut ale API-ului. Așteaptă 60 de secunde.")
+            st.warning("⚠️ Ai depășit limita gratuită (10 apeluri/minut). Așteaptă 60 de secunde.")
             return historical, []
         elif response.status_code != 200:
             st.error(f"Eroare API Football-Data (Cod HTTP {response.status_code})")
@@ -274,11 +276,11 @@ def fetch_upcoming_and_historical_matches(api_key=""):
         raw_matches = res.get("matches", [])
         
         if not raw_matches:
-            st.info(f"Nu au fost găsite meciuri programate în ligile gratuite în intervalul {date_from} — {date_to}.")
+            st.info("Nu au fost găsite meciuri programate în ligile disponibile gratuit.")
             return historical, []
 
         upcoming = []
-        for m in raw_matches:
+        for m in raw_matches[:15]:
             home_name = m.get("homeTeam", {}).get("name", "Gazde")
             away_name = m.get("awayTeam", {}).get("name", "Oaspeți")
             competition = m.get("competition", {}).get("name", "Fotbal")
@@ -333,13 +335,13 @@ else:
             c1, c2, c3, c4 = st.columns(4)
             
             with c1:
-                o1 = st.number_input(f"Cotă 1", value=match["odds"].get("1", 2.10), key=f"o1_{idx}_{match['id']}")
+                o1 = st.number_input("Cotă 1", value=match["odds"].get("1", 2.10), key=f"o1_{idx}_{match['id']}")
             with c2:
-                ox = st.number_input(f"Cotă X", value=match["odds"].get("X", 3.30), key=f"ox_{idx}_{match['id']}")
+                ox = st.number_input("Cotă X", value=match["odds"].get("X", 3.30), key=f"ox_{idx}_{match['id']}")
             with c3:
-                o2 = st.number_input(f"Cotă 2", value=match["odds"].get("2", 3.50), key=f"o2_{idx}_{match['id']}")
+                o2 = st.number_input("Cotă 2", value=match["odds"].get("2", 3.50), key=f"o2_{idx}_{match['id']}")
             with c4:
-                o_over = st.number_input(f"Cotă Over 2.5", value=match["odds"].get("OVER_2.5", 1.90), key=f"oover_{idx}_{match['id']}")
+                o_over = st.number_input("Cotă Over 2.5", value=match["odds"].get("OVER_2.5", 1.90), key=f"oover_{idx}_{match['id']}")
 
             current_odds = {"1": o1, "X": ox, "2": o2, "OVER_2.5": o_over}
 
