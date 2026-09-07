@@ -5,23 +5,26 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from scipy.optimize import minimize
 from scipy.stats import poisson
-from difflib import SequenceMatcher
 from datetime import datetime, timezone
 
 # ============================================================
-# CONFIGURARE SENSITIVITATE ȘI PARAMETRI
+# CONFIGURARE PAGINĂ STREAMLIT
 # ============================================================
 
-MAX_GOALS = 15
-DECAY_DAYS = 180           # Ponderare temporală (jumătate de viață a datelor)
-SHRINKAGE_GAMES = 8        # Ponderare spre media ligii pentru eșantioane mici
-DEFAULT_RHO = -0.10        # Corecție Dixon-Coles implicită pentru scoruri joase (0-0, 1-0, 0-1, 1-1)
+st.set_page_config(
+    page_title="Quantitative Football Analytics Engine V4",
+    page_icon="⚽",
+    layout="wide"
+)
 
-# Praguri minime pentru a clasifica un pariu ca fiind VALUE BET
-MIN_EDGE = 0.04            # Edge de minim 4% față de cota implicată
-MIN_EV = 0.05              # Expected Value minim de +5%
+MAX_GOALS = 15
+DECAY_DAYS = 180
+SHRINKAGE_GAMES = 8
+DEFAULT_RHO = -0.10
+
+MIN_EDGE = 0.04
+MIN_EV = 0.05
 
 # ============================================================
 # UTILS & MATEMATICĂ
@@ -42,20 +45,15 @@ def implied_probability(odds):
     return 1.0 / odds
 
 def calculate_ev(prob, odds):
-    """Calcul Expected Value (EV) raportat la 1 unitate mizată."""
     if odds is None or odds <= 1.0:
         return None
     return (prob * (odds - 1.0)) - (1.0 - prob)
 
 # ============================================================
-# PONDERARE TEMPORALĂ (TIME DECAY)
+# PONDERARE TEMPORALĂ & ENGINE V4
 # ============================================================
 
 def get_temporal_weight(match_date, ref_date=None):
-    """
-    Calculează greutatea unui meci în funcție de cât de recent a fost jucat.
-    Previne Data Leakage primind opțional un ref_date (data simulării).
-    """
     if ref_date is None:
         ref_date = datetime.now(timezone.utc).replace(tzinfo=None)
     elif isinstance(ref_date, str):
@@ -73,14 +71,7 @@ def get_temporal_weight(match_date, ref_date=None):
     weight = math.exp(-age_days / DECAY_DAYS)
     return clamp(weight, 0.05, 1.0)
 
-# ============================================================
-# CONSTRUIRE DATABASE REAL & LEAGUE AVERAGES (FĂRĂ MOCK DATA)
-# ============================================================
-
 def build_real_team_database(matches, ref_date=None):
-    """
-    Procesează meciurile reale. Elimină orice generație aleatorie.
-    """
     teams = {}
     home_goals, away_goals = [], []
 
@@ -116,10 +107,6 @@ def build_real_team_database(matches, ref_date=None):
 
     return teams, avg_home, avg_away
 
-# ============================================================
-# CALCUL STRENGTH & SHRINKAGE
-# ============================================================
-
 def calculate_team_strength(team, venue, database, league_avg):
     matches = [m for m in database.get(team, []) if m["venue"] == venue]
 
@@ -134,7 +121,6 @@ def calculate_team_strength(team, venue, database, league_avg):
     avg_gf = np.average(gf, weights=weights) if total_w > 0 else np.mean(gf)
     avg_ga = np.average(ga, weights=weights) if total_w > 0 else np.mean(ga)
 
-    # Bayesian Shrinkage către media ligii pentru stabilizare
     games = len(matches)
     shrink = games / (games + SHRINKAGE_GAMES)
 
@@ -152,7 +138,6 @@ def calculate_recent_form(team, database, last_n=5):
     if not matches:
         return 1.0
 
-    # Sortare după recență
     sorted_m = sorted(matches, key=lambda x: x["weight"], reverse=True)[:last_n]
     points = []
     for m in sorted_m:
@@ -164,12 +149,7 @@ def calculate_recent_form(team, database, last_n=5):
             points.append(0)
 
     avg_p = np.mean(points) if points else 1.36
-    # Normalizare între 0.80 și 1.20
     return float(0.80 + (avg_p / 3.0) * 0.40)
-
-# ============================================================
-# DIXON-COLES CORE ENGINE
-# ============================================================
 
 def dixon_coles_tau(h, a, l_home, l_away, rho):
     if h == 0 and a == 0:
@@ -203,7 +183,6 @@ def calculate_expected_goals(home_team, away_team, database, avg_home, avg_away)
     l_home = avg_home * h_str["attack"] * a_str["defense"]
     l_away = avg_away * a_str["attack"] * h_str["defense"]
 
-    # Ajustare moderată cu forma
     h_form = calculate_recent_form(home_team, database)
     a_form = calculate_recent_form(away_team, database)
 
@@ -211,10 +190,6 @@ def calculate_expected_goals(home_team, away_team, database, avg_home, avg_away)
     l_away *= (0.85 + 0.15 * a_form)
 
     return clamp(l_home, 0.2, 4.5), clamp(l_away, 0.2, 4.5)
-
-# ============================================================
-# PIEȚE PROBABILISTICE & VALUE EVALUATION
-# ============================================================
 
 def extract_markets_from_matrix(matrix):
     size = matrix.shape[0]
@@ -241,75 +216,92 @@ def extract_markets_from_matrix(matrix):
 
     return markets
 
-def evaluate_value_bet(market_key, model_prob, bookmaker_odds):
-    if bookmaker_odds is None or bookmaker_odds <= 1.0:
-        return None
-
-    implied_p = implied_probability(bookmaker_odds)
-    ev = calculate_ev(model_prob, bookmaker_odds)
-    edge = model_prob - implied_p
-
-    is_value = (edge >= MIN_EDGE) and (ev >= MIN_EV)
-
-    return {
-        "market": market_key,
-        "model_prob": model_prob,
-        "fair_odds": fair_odds(model_prob),
-        "bookie_odds": bookmaker_odds,
-        "implied_prob": implied_p,
-        "edge": edge,
-        "ev": ev,
-        "is_value": is_value
-    }
-
 # ============================================================
-# STRICT BACKTESTING FRAMEWORK (PREVENIRE DATA LEAKAGE)
+# MOCK HISTORICAL DATA CA EXEMPLU REAL DE START
 # ============================================================
 
-def run_leakage_free_backtest(historical_matches):
-    """
-    Execută un backtest unde la fiecare meci se folosesc
-    EXCLUSIV meciurile jucate ANTERIOR datei meciului analizat.
-    """
-    # Sortare cronologică
-    sorted_matches = sorted(
-        [m for m in historical_matches if m.get("completed")],
-        key=lambda x: x["date"]
-    )
+def get_sample_matches():
+    return [
+        {"home": "Inter", "away": "Milan", "score_home": 2, "score_away": 1, "completed": True, "date": "2026-08-01"},
+        {"home": "Juventus", "away": "Roma", "score_home": 1, "score_away": 1, "completed": True, "date": "2026-08-02"},
+        {"home": "Inter", "away": "Juventus", "score_home": 1, "score_away": 0, "completed": True, "date": "2026-08-10"},
+        {"home": "Milan", "away": "Roma", "score_home": 3, "score_away": 2, "completed": True, "date": "2026-08-12"},
+        {"home": "Roma", "away": "Inter", "score_home": 0, "score_away": 2, "completed": True, "date": "2026-08-20"},
+        {"home": "Milan", "away": "Juventus", "score_home": 2, "score_away": 2, "completed": True, "date": "2026-08-22"},
+        {"home": "Inter", "away": "Napoli", "score_home": 3, "score_away": 1, "completed": True, "date": "2026-08-28"},
+        {"home": "Napoli", "away": "Milan", "score_home": 1, "score_away": 2, "completed": True, "date": "2026-09-01"},
+    ]
 
-    brier_scores = []
-    log_losses = []
-    evaluated_bets = []
+# ============================================================
+# INTERFAȚĂ STREAMLIT (UI)
+# ============================================================
 
-    for i in range(20, len(sorted_matches)):  # Pornim după un minim de meciuri
-        target = sorted_matches[i]
-        past_matches = sorted_matches[:i]
+st.title("⚽ Quantitative Football Analytics Engine V4")
+st.caption("Dixon-Coles + Weighted MLE + Expected Value (EV) Filtering")
 
-        ref_date = target["date"]
-        db, avg_h, avg_a = build_real_team_database(past_matches, ref_date=ref_date)
+matches = get_sample_matches()
+db, avg_home, avg_away = build_real_team_database(matches)
+available_teams = sorted(list(db.keys()))
 
-        h_team, a_team = target["home"], target["away"]
-        if h_team not in db or a_team not in db:
-            continue
+st.sidebar.header("⚙️ Configurare Meci")
 
-        l_h, l_a = calculate_expected_goals(h_team, a_team, db, avg_h, avg_a)
+if len(available_teams) >= 2:
+    home_team = st.sidebar.selectbox("Echipa Gazdă", available_teams, index=0)
+    away_team = st.sidebar.selectbox("Echipa Oaspete", available_teams, index=1)
+
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Cote Bookmaker")
+    odds_1 = st.sidebar.number_input("Cotă 1", value=1.95, step=0.05)
+    odds_x = st.sidebar.number_input("Cotă X", value=3.40, step=0.05)
+    odds_2 = st.sidebar.number_input("Cotă 2", value=4.10, step=0.05)
+    odds_over25 = st.sidebar.number_input("Cotă Over 2.5", value=2.05, step=0.05)
+
+    if home_team == away_team:
+        st.error("Selectează două echipe diferite!")
+    else:
+        l_h, l_a = calculate_expected_goals(home_team, away_team, db, avg_home, avg_away)
         matrix = build_dixon_coles_matrix(l_h, l_a)
         markets = extract_markets_from_matrix(matrix)
 
-        # Rezultat real (0: 1, 1: X, 2: 2)
-        sh, sa = float(target["score_home"]), float(target["score_away"])
-        actual_idx = 0 if sh > sa else (1 if sh == sa else 2)
-        probs_1x2 = [markets["1"], markets["X"], markets["2"]]
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Expected Goals Gazde", f"{l_h:.2f}")
+        with col2:
+            st.metric("Expected Goals Oaspeți", f"{l_a:.2f}")
 
-        # Metrics
-        brier = sum((probs_1x2[j] - (1 if j == actual_idx else 0)) ** 2 for j in range(3))
-        log_loss = -math.log(safe_probability(probs_1x2[actual_idx]))
+        st.subheader("📊 Analiză Valoare Matematică (Value Bets)")
 
-        brier_scores.append(brier)
-        log_losses.append(log_loss)
+        bookmaker_odds = {
+            "1": odds_1,
+            "X": odds_x,
+            "2": odds_2,
+            "OVER_2.5": odds_over25
+        }
 
-    return {
-        "mean_brier": float(np.mean(brier_scores)) if brier_scores else None,
-        "mean_log_loss": float(np.mean(log_losses)) if log_losses else None,
-        "evaluated_matches": len(brier_scores)
-    }
+        results = []
+        for market, prob in markets.items():
+            if market in bookmaker_odds:
+                odds = bookmaker_odds[market]
+                imp_prob = implied_probability(odds)
+                ev = calculate_ev(prob, odds)
+                edge = prob - imp_prob if imp_prob else 0
+
+                is_value = (edge >= MIN_EDGE) and (ev >= MIN_EV)
+                decision = "🟢 VALUE BET" if is_value else "🔴 PASS"
+
+                results.append({
+                    "Piață": market,
+                    "Probabilitate Model": f"{prob * 100:.1f}%",
+                    "Cotă Corectă (Fair)": f"{fair_odds(prob):.2f}",
+                    "Cotă Bookmaker": f"{odds:.2f}",
+                    "Prob. Implicată": f"{imp_prob * 100:.1f}%" if imp_prob else "N/A",
+                    "Edge": f"{edge * 100:+.1f}%",
+                    "EV": f"{ev * 100:+.1f}%",
+                    "Decizie": decision
+                })
+
+        df_results = pd.DataFrame(results)
+        st.dataframe(df_results, use_container_width=True)
+
+else:
+    st.info("Sunt necesare cel puțin două echipe în baza de date pentru evaluare.")
