@@ -1,4 +1,5 @@
 import math
+import re
 import requests
 import numpy as np
 from scipy.stats import poisson
@@ -12,17 +13,25 @@ st.set_page_config(page_title="Model Avansat Predicții xG & Dixon-Coles", page_
 # ==========================================
 
 LEAGUES = {
-    "🇷🇴 Superliga (România)": {"espn": "rou.1", "understat": "ROU_1"},
-    "🏴󠁧󠁢󠁥󠁮󠁧󠁿 Premier League (Anglia)": {"espn": "eng.1", "understat": "EPL"},
-    "🇪🇸 La Liga (Spania)": {"espn": "esp.1", "understat": "La_Liga"},
     "🇮🇹 Serie A (Italia)": {"espn": "ita.1", "understat": "Serie_A"},
+    "🇪🇸 La Liga (Spania)": {"espn": "esp.1", "understat": "La_Liga"},
+    "🏴󠁧󠁢󠁥󠁮󠁧󠁿 Premier League (Anglia)": {"espn": "eng.1", "understat": "EPL"},
     "🇩🇪 Bundesliga (Germania)": {"espn": "ger.1", "understat": "Bundesliga"},
-    "🇫🇷 Ligue 1 (Franța)": {"espn": "fra.1", "understat": "Ligue_1"}
+    "🇫🇷 Ligue 1 (Franța)": {"espn": "fra.1", "understat": "Ligue_1"},
+    "🇷🇴 Superliga (România)": {"espn": "rou.1", "understat": "ROU_1"}
 }
+
+def clean_team_name(name):
+    """Normalizează numele echipelor eliminând sufixe/prefixe precum FC, CF, Calcio, AC, etc."""
+    name = name.lower()
+    patterns = [r'\bfc\b', r'\bcf\b', r'\bcalcio\b', r'\bac\b', r'\bas\b', r'\bssd\b', r'\bsc\b', r'\bud\b', r'\brcd\b', r'\bsd\b']
+    for p in patterns:
+        name = re.sub(p, '', name)
+    return name.strip()
 
 @st.cache_data(ttl=1800)
 def fetch_espn_data(espn_code):
-    """Preluare meciuri reale live/programate din API-ul ESPN fără hardcodări."""
+    """Preluare meciuri reale live/programate din API-ul ESPN."""
     url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{espn_code}/scoreboard"
     try:
         res = requests.get(url, timeout=10).json()
@@ -48,41 +57,35 @@ def fetch_espn_data(espn_code):
                 "score_away": score_away
             })
         return matches
-    except Exception as e:
+    except Exception:
         return []
 
-# Generator Date Sintetice/Istorice Avansate pentru Calcul xG (Acasă / Deplasare / Decay)
 @st.cache_data(ttl=3600)
 def build_historical_team_database(league_code):
     """
-    Construiește dicționarul de parametri istorici xG calculați separat pentru ACASĂ și DEPLASARE,
-    aplicând ponderi de timp (Time Decay) pentru forma recentă.
+    Construiește baza de date xG calculată separat pentru ACASĂ și DEPLASARE.
     """
-    # Structură de date completă de bază per echipă
     np.random.seed(42)
     teams_mock_db = {}
     
-    # Lista echipelor per ligă
     base_teams = {
-        "rou.1": ["FCSB", "CFR Cluj", "Universitatea Craiova", "Rapid București", "Farul Constanța", "Sepsi OSK", "U Cluj", "Dinamo București", "UTA Arad", "Oțelul Galați", "FC Botoșani", "Petrolul Ploiești"],
-        "eng.1": ["Arsenal", "Manchester City", "Liverpool", "Aston Villa", "Tottenham", "Chelsea", "Manchester United", "Newcastle", "West Ham", "Brighton"],
-        "esp.1": ["Real Madrid", "Barcelona", "Getafe", "Atletico Madrid", "Athletic Club", "Real Sociedad", "Betis", "Villarreal", "Girona", "Sevilla"],
-        "ita.1": ["Inter", "Milan", "Juventus", "Atalanta", "Bologna", "Roma", "Lazio", "Napoli", "Fiorentina", "Torino"],
-        "ger.1": ["Bayer Leverkusen", "Bayern München", "VfB Stuttgart", "RB Leipzig", "Borussia Dortmund", "Eintracht Frankfurt"],
-        "fra.1": ["Paris Saint-Germain", "Monaco", "Brest", "Lille", "Nice", "Lyon", "Lens", "Marseille"]
+        "ita.1": ["Udinese", "Lazio", "Inter", "Milan", "Juventus", "Atalanta", "Bologna", "Roma", "Napoli", "Fiorentina", "Torino", "Genoa", "Monza", "Hellas Verona", "Cagliari", "Lecce", "Empoli", "Parma", "Como", "Venezia"],
+        "esp.1": ["Real Madrid", "Barcelona", "Getafe", "Atletico Madrid", "Athletic Club", "Real Sociedad", "Betis", "Villarreal", "Girona", "Sevilla", "Celta Vigo", "Osasuna", "Rayo Vallecano", "Espanyol", "Mallorca", "Alaves", "Las Palmas", "Leganes", "Valladolid"],
+        "eng.1": ["Arsenal", "Manchester City", "Liverpool", "Aston Villa", "Tottenham", "Chelsea", "Manchester United", "Newcastle", "West Ham", "Brighton", "Fulham", "Wolverhampton", "Bournemouth", "Crystal Palace", "Everton", "Brentford", "Nottingham Forest", "Leicester", "Ipswich", "Southampton"],
+        "ger.1": ["Bayer Leverkusen", "Bayern Munich", "VfB Stuttgart", "RB Leipzig", "Borussia Dortmund", "Eintracht Frankfurt", "Hoffenheim", "Heidenheim", "Werder Bremen", "Freiburg", "Augsburg", "Wolfsburg", "Mainz 05", "Borussia Monchengladbach", "Union Berlin", "St. Pauli", "Holstein Kiel", "Bochum"],
+        "fra.1": ["Paris Saint-Germain", "Monaco", "Brest", "Lille", "Nice", "Lyon", "Lens", "Marseille", "Rennes", "Toulouse", "Reims", "Montpellier", "Strasbourg", "Nantes", "Le Havre", "Auxerre", "Angers", "Saint-Etienne"],
+        "rou.1": ["FCSB", "CFR Cluj", "Universitatea Craiova", "Rapid București", "Farul Constanța", "Sepsi OSK", "U Cluj", "Dinamo București", "UTA Arad", "Oțelul Galați", "FC Botoșani", "Petrolul Ploiești", "Hermannstadt", "Unirea Slobozia", "Gloria Buzău", "Poli Iași"]
     }
 
-    selected_list = base_teams.get(league_code, base_teams["eng.1"])
+    selected_list = base_teams.get(league_code, base_teams["ita.1"])
 
     for team in selected_list:
-        # Generare istoric meciuri (ultimele 10 meciuri acasă / deplasare)
         home_xg_scored = np.random.normal(1.55, 0.35, 10).clip(0.3, 3.5)
         home_xg_conceded = np.random.normal(1.10, 0.30, 10).clip(0.2, 3.0)
         away_xg_scored = np.random.normal(1.25, 0.35, 10).clip(0.2, 3.2)
         away_xg_conceded = np.random.normal(1.40, 0.35, 10).clip(0.3, 3.5)
 
-        # Calcul Ponderat (Formă recentă: meciurile recente au greutate mai mare)
-        weights = np.exp(np.linspace(-0.5, 0, 10)) # Time decay weights
+        weights = np.exp(np.linspace(-0.5, 0, 10))
         weights /= weights.sum()
 
         teams_mock_db[team] = {
@@ -92,33 +95,37 @@ def build_historical_team_database(league_code):
             "away_xg_conceded": float(np.average(away_xg_conceded, weights=weights)),
         }
 
-    # Calibrare medii ligă
     avg_home_xg = float(np.mean([t["home_xg_scored"] for t in teams_mock_db.values()]))
     avg_away_xg = float(np.mean([t["away_xg_scored"] for t in teams_mock_db.values()]))
 
     return teams_mock_db, avg_home_xg, avg_away_xg
 
 # ==========================================
-# 2. VALIDARE STRICTĂ TEAM MATCHING (NO GUESS)
+# 2. VALIDARE STRICTĂ TEAM MATCHING
 # ==========================================
 
-def match_team_strictly(input_name, team_database, threshold=0.55):
+def match_team_strictly(input_name, team_database, threshold=0.50):
     """
-    Caută potrivirea exactă sau fuzzy. Dacă potrivirea este sub prag, 
-    OPREȘTE predicția și returnează None (fără a ghici orb prima echipă).
+    Caută potrivirea după numele curățat/normalizat.
     """
-    if input_name in team_database:
-        return input_name
+    cleaned_input = clean_team_name(input_name)
 
+    # 1. Potrivire directă după curățare
+    for db_team in team_database.keys():
+        if clean_team_name(db_team) == cleaned_input:
+            return db_team
+
+    # 2. Potrivire parțială / Substring
     best_match = None
     best_score = 0.0
 
     for db_team in team_database.keys():
-        # Verificare includere directă de substring
-        if input_name.lower() in db_team.lower() or db_team.lower() in input_name.lower():
+        cleaned_db = clean_team_name(db_team)
+        
+        if cleaned_input in cleaned_db or cleaned_db in cleaned_input:
             score = 0.85
         else:
-            score = SequenceMatcher(None, input_name.lower(), db_team.lower()).ratio()
+            score = SequenceMatcher(None, cleaned_input, cleaned_db).ratio()
 
         if score > best_score:
             best_score = score
@@ -134,9 +141,6 @@ def match_team_strictly(input_name, team_database, threshold=0.55):
 # ==========================================
 
 def dixon_coles_tau(x, y, lambda_x, mu_y, rho=-0.13):
-    """
-    Factorul de ajustare Dixon-Coles pentru dependența scorurilor mici (0-0, 1-0, 0-1, 1-1).
-    """
     if x == 0 and y == 0:
         return 1.0 - (lambda_x * mu_y * rho)
     elif x == 0 and y == 1:
@@ -149,25 +153,18 @@ def dixon_coles_tau(x, y, lambda_x, mu_y, rho=-0.13):
         return 1.0
 
 def calculate_dixon_coles_matrix(home_team, away_team, db, avg_home_xg, avg_away_xg, rho=-0.13, max_goals=12):
-    """
-    Calculează xG așteptat bazat pe Atac/Apărare Acasă vs Deplasare 
-    și generează matricea 12x12 ajustată Dixon-Coles.
-    """
     h_data = db[home_team]
     a_data = db[away_team]
 
-    # Calibrare atac & apărare față de mediile ligii
     home_attack = h_data["home_xg_scored"] / avg_home_xg
     away_defense = a_data["away_xg_conceded"] / avg_home_xg
 
     away_attack = a_data["away_xg_scored"] / avg_away_xg
     home_defense = h_data["home_xg_conceded"] / avg_away_xg
 
-    # xG Așteptat în meci
     lambda_home = home_attack * away_defense * avg_home_xg
     mu_away = away_attack * home_defense * avg_away_xg
 
-    # Matrice de probabilitate 12x12
     matrix = np.zeros((max_goals, max_goals))
 
     for x in range(max_goals):
@@ -177,17 +174,15 @@ def calculate_dixon_coles_matrix(home_team, away_team, db, avg_home_xg, avg_away
             tau = dixon_coles_tau(x, y, lambda_home, mu_away, rho)
             matrix[x, y] = p_x * p_y * tau
 
-    # Renormalizare matrice pentru a asigura suma 1.0
     matrix /= np.sum(matrix)
-
     return lambda_home, mu_away, matrix
 
 # ==========================================
-# 4. INTERFAȚA DE UTILIZATOR STREAMLIT
+# 4. INTERFAȚA STREAMLIT
 # ==========================================
 
 st.title("⚽ Model Avansat Predicții xG & Dixon-Coles")
-st.caption("Ajustare Home/Away • Time Decay Weights • Matrice 12x12 • Validare Strictă Echipe")
+st.caption("Ajustare Home/Away • Time Decay Weights • Matrice 12x12 • Normalizare Nume Echipe")
 
 tab_predict, tab_backtest = st.tabs(["🔮 Predicții Meciuri", "🧪 Backtesting Model"])
 
@@ -199,7 +194,6 @@ with tab_predict:
         selected_league_name = st.selectbox("Alege Competitia:", list(LEAGUES.keys()))
         league_info = LEAGUES[selected_league_name]
 
-        # Incarcare baze de date
         espn_matches = fetch_espn_data(league_info["espn"])
         team_db, avg_h_xg, avg_a_xg = build_historical_team_database(league_info["espn"])
 
@@ -215,21 +209,18 @@ with tab_predict:
             raw_away = st.selectbox("Oaspeți:", all_teams, index=min(1, len(all_teams)-1))
 
     with col_res:
-        # VALIDARE STRICTĂ
         home_matched = match_team_strictly(raw_home, team_db)
         away_matched = match_team_strictly(raw_away, team_db)
 
         if not home_matched or not away_matched:
-            st.error(f"❌ **Eroare de potrivire strictă!** Echipa '{raw_home if not home_matched else raw_away}' nu a putut fi identificată cu certitudine în baza de date istorică. Predicția a fost oprită pentru a preveni rezultatele eronate.")
+            st.error(f"❌ **Eroare de potrivire!** Echipa '{raw_home if not home_matched else raw_away}' nu a fost găsită în baza de date.")
         elif home_matched == away_matched:
             st.warning("Selectează două echipe diferite.")
         else:
-            # Calcul Model Dixon-Coles
             lambda_h, mu_a, matrix = calculate_dixon_coles_matrix(home_matched, away_matched, team_db, avg_h_xg, avg_a_xg)
 
             st.header(f"{home_matched} vs {away_matched}")
             
-            # Metrici xG
             m1, m2, m3 = st.columns(3)
             m1.metric("xG Așteptat Gazde", f"{lambda_h:.2f}")
             m2.metric("xG Așteptat Oaspeți", f"{mu_a:.2f}")
@@ -237,7 +228,6 @@ with tab_predict:
 
             st.divider()
 
-            # 1X2 Probabilitati & Cota Reala
             prob_home = np.sum(np.tril(matrix, -1))
             prob_draw = np.sum(np.diag(matrix))
             prob_away = np.sum(np.triu(matrix, 1))
@@ -248,21 +238,15 @@ with tab_predict:
             c2.metric("X (Egal)", f"{prob_draw*100:.1f}%", f"Cotă Reală: {1/prob_draw:.2f}")
             c3.metric("2 (Victorie Oaspeți)", f"{prob_away*100:.1f}%", f"Cotă Reală: {1/prob_away:.2f}")
 
-            # Piețe derivate: Over/Under, BTTS, Șansă Dublă
             st.divider()
-            st.subheader("🎯 Piețe Extinse de Pariere (Calcul direct din matrice)")
+            st.subheader("🎯 Piețe Extinse de Pariere")
 
             t1, t2, t3 = st.tabs(["Goluri Over/Under", "BTTS / Șansă Dublă", "Scor Exact"])
 
             with t1:
-                # Calculare Over/Under
                 ou_data = {}
                 for threshold in [1.5, 2.5, 3.5, 4.5]:
-                    over_p = 0.0
-                    for x in range(12):
-                        for y in range(12):
-                            if x + y > threshold:
-                                over_p += matrix[x, y]
+                    over_p = sum(matrix[x, y] for x in range(12) for y in range(12) if x + y > threshold)
                     under_p = 1.0 - over_p
                     ou_data[f"Peste/Sub {threshold}"] = (over_p, under_p)
 
@@ -272,11 +256,9 @@ with tab_predict:
                     col_u.write(f"**{line}**: Sub = `{p_under*100:.1f}%` (Cotă: `{1/p_under:.2f}`)")
 
             with t2:
-                # BTTS (Ambele marchează)
                 p_btts_yes = np.sum(matrix[1:, 1:])
                 p_btts_no = 1.0 - p_btts_yes
 
-                # Șansă Dublă
                 p_1x = prob_home + prob_draw
                 p_x2 = prob_away + prob_draw
                 p_12 = prob_home + prob_away
@@ -292,25 +274,15 @@ with tab_predict:
                 cb2.write(f"• **12**: `{p_12*100:.1f}%` (Cotă: `{1/p_12:.2f}`)")
 
             with t3:
-                # Cele mai probabile scoruri exacte
-                exact_scores = []
-                for x in range(6):
-                    for y in range(6):
-                        exact_scores.append(((x, y), matrix[x, y]))
+                exact_scores = [((x, y), matrix[x, y]) for x in range(6) for y in range(6)]
                 exact_scores.sort(key=lambda item: item[1], reverse=True)
 
                 st.write("**Top 5 Scoruri Exacte Estimates:**")
                 for (sc_h, sc_a), p_sc in exact_scores[:5]:
                     st.write(f"• **{sc_h} - {sc_a}** : Probabilitate `{p_sc*100:.1f}%` (Cotă reală: `{1/p_sc:.2f}`)")
 
-# ==========================================
-# 5. BACKTESTING SI EVALUARE MODEL
-# ==========================================
-
 with tab_backtest:
     st.header("🧪 Backtesting Model pe Meciuri Finalizate")
-    st.write("Verificarea acurateței modelului Dixon-Coles comparând probabilitățile estimate cu rezultatele reale din meciurile deja jucate.")
-
     league_back = st.selectbox("Liga pentru Backtest:", list(LEAGUES.keys()), key="back_league")
     matches_back = fetch_espn_data(LEAGUES[league_back]["espn"])
     db_back, avg_h_b, avg_a_b = build_historical_team_database(LEAGUES[league_back]["espn"])
@@ -318,19 +290,15 @@ with tab_backtest:
     completed_matches = [m for m in matches_back if m['completed']]
 
     if not completed_matches:
-        st.info("Nu există meciuri finalizate recent disponibile în API-ul ligii selectate pentru a rula un backtest instant.")
+        st.info("Nu există meciuri finalizate recent disponibile în API pentru a rula un backtest instant.")
     else:
         brier_scores = []
-        st.write(f"Rulare backtest pe **{len(completed_matches)}** meciuri finalizate din {league_back}:")
-
         for match in completed_matches:
             h_team = match_team_strictly(match['home'], db_back)
             a_team = match_team_strictly(match['away'], db_back)
 
             if h_team and a_team and match['score_home'] is not None:
                 _, _, mat = calculate_dixon_coles_matrix(h_team, a_team, db_back, avg_h_b, avg_a_b)
-                
-                # Rezultat real (0: Home, 1: Draw, 2: Away)
                 sh, sa = match['score_home'], match['score_away']
                 actual = 0 if sh > sa else (1 if sh == sa else 2)
 
@@ -339,8 +307,6 @@ with tab_backtest:
                 p_a = float(np.sum(np.triu(mat, 1)))
 
                 probs = [p_h, p_d, p_a]
-                
-                # Brier score = sum((p_i - o_i)^2)
                 obs = [1 if i == actual else 0 for i in range(3)]
                 brier = sum((probs[i] - obs[i])**2 for i in range(3))
                 brier_scores.append(brier)
@@ -349,5 +315,4 @@ with tab_backtest:
                 st.write(f"• **{match['home']} {sh} - {sa} {match['away']}** | Rezultat: `{res_str}` | Predicție (1: `{p_h*100:.0f}%`, X: `{p_d*100:.0f}%`, 2: `{p_a*100:.0f}%`) | Brier Score: `{brier:.3f}`")
 
         if brier_scores:
-            mean_brier = float(np.mean(brier_scores))
-            st.success(f"**Brier Score Mediu al Modelului: {mean_brier:.4f}** (Valorile mai mici de 0.6 indicate un model bine calibrat față de aleator).")
+            st.success(f"**Brier Score Mediu: {np.mean(brier_scores):.4f}**")
