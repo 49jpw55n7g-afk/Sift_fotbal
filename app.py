@@ -1,343 +1,315 @@
 import math
 import re
 import unicodedata
-import requests
 import numpy as np
-from scipy.stats import poisson
+import pandas as pd
 import streamlit as st
+
+from scipy.optimize import minimize
+from scipy.stats import poisson
 from difflib import SequenceMatcher
+from datetime import datetime, timezone
 
-st.set_page_config(page_title="Model Avansat Predicții xG & Dixon-Coles", page_icon="⚽", layout="wide")
+# ============================================================
+# CONFIGURARE SENSITIVITATE ȘI PARAMETRI
+# ============================================================
 
-# ==========================================
-# 1. SURSE DE DATE ȘI MAPĂRI API (DYNAMIC)
-# ==========================================
+MAX_GOALS = 15
+DECAY_DAYS = 180           # Ponderare temporală (jumătate de viață a datelor)
+SHRINKAGE_GAMES = 8        # Ponderare spre media ligii pentru eșantioane mici
+DEFAULT_RHO = -0.10        # Corecție Dixon-Coles implicită pentru scoruri joase (0-0, 1-0, 0-1, 1-1)
 
-LEAGUES = {
-    "🇮🇹 Serie A (Italia)": {"espn": "ita.1", "understat": "Serie_A"},
-    "🇪🇸 La Liga (Spania)": {"espn": "esp.1", "understat": "La_Liga"},
-    "🏴󠁧󠁢󠁥󠁮󠁧󠁿 Premier League (Anglia)": {"espn": "eng.1", "understat": "EPL"},
-    "🇩🇪 Bundesliga (Germania)": {"espn": "ger.1", "understat": "Bundesliga"},
-    "🇫🇷 Ligue 1 (Franța)": {"espn": "fra.1", "understat": "Ligue_1"},
-    "🇷🇴 Superliga (România)": {"espn": "rou.1", "understat": "ROU_1"}
-}
+# Praguri minime pentru a clasifica un pariu ca fiind VALUE BET
+MIN_EDGE = 0.04            # Edge de minim 4% față de cota implicată
+MIN_EV = 0.05              # Expected Value minim de +5%
 
-STATIC_TEAMS_FALLBACK = {
-    "ita.1": ["Udinese", "Lazio", "Inter", "Milan", "Juventus", "Atalanta", "Bologna", "Roma", "Napoli", "Fiorentina", "Torino", "Genoa", "Monza", "Hellas Verona", "Cagliari", "Lecce", "Empoli", "Parma", "Como", "Venezia"],
-    "esp.1": ["Elche", "Real Sociedad", "Real Madrid", "Barcelona", "Getafe", "Atletico Madrid", "Athletic Club", "Real Betis", "Villarreal", "Girona", "Sevilla", "Celta Vigo", "Osasuna", "Rayo Vallecano", "Espanyol", "Mallorca", "Alaves", "Las Palmas", "Leganes", "Valladolid"],
-    "eng.1": ["Arsenal", "Manchester City", "Liverpool", "Aston Villa", "Tottenham Hotspur", "Chelsea", "Manchester United", "Newcastle United", "West Ham United", "Brighton & Hove Albion", "Fulham", "Wolverhampton Wanderers", "AFC Bournemouth", "Crystal Palace", "Everton", "Brentford", "Nottingham Forest", "Leicester City", "Ipswich Town", "Southampton"],
-    "ger.1": ["Bayer Leverkusen", "Bayern Munich", "VfB Stuttgart", "RB Leipzig", "Borussia Dortmund", "Eintracht Frankfurt", "TSG Hoffenheim", "1. FC Heidenheim", "Werder Bremen", "SC Freiburg", "FC Augsburg", "VfL Wolfsburg", "FSV Mainz 05", "Borussia Monchengladbach", "Union Berlin", "FC St. Pauli", "Holstein Kiel", "VfL Bochum"],
-    "fra.1": ["Paris Saint-Germain", "AS Monaco", "Stade Brestois 29", "LOSC Lille", "OGC Nice", "Olympique Lyonnais", "RC Lens", "Olympique de Marseille", "Stade Rennais", "Toulouse FC", "Stade de Reims", "Montpellier HSC", "RC Strasbourg", "FC Nantes", "Le Havre AC", "AJ Auxerre", "Angers SCO", "AS Saint-Etienne"],
-    "rou.1": ["FCSB", "CFR Cluj", "Universitatea Craiova", "Rapid București", "Farul Constanța", "Sepsi OSK", "U Cluj", "Dinamo București", "UTA Arad", "Oțelul Galați", "FC Botoșani", "Petrolul Ploiești", "Hermannstadt", "Unirea Slobozia", "Gloria Buzău", "Poli Iași"]
-}
+# ============================================================
+# UTILS & MATEMATICĂ
+# ============================================================
 
-def remove_diacritics(text):
-    """Elimină diacriticele și accentele pentru potrivire sigură."""
-    nfkd_form = unicodedata.normalize('NFKD', text)
-    return "".join([c for c in nfkd_form if not unicodedata.combining(c)])
+def clamp(x, low, high):
+    return max(low, min(high, float(x)))
 
-def clean_team_name(name):
-    """Normalizează numele echipelor eliminând prefixe/sufixe uzuale."""
-    name = remove_diacritics(name.lower())
-    patterns = [r'\bfc\b', r'\bcf\b', r'\bcalcio\b', r'\bac\b', r'\bas\b', r'\bssd\b', r'\bsc\b', r'\bud\b', r'\brcd\b', r'\bsd\b', r'\bafc\b', r'\brc\b', r'\bvfl\b', r'\bvfb\b', r'\btsg\b', r'\bfsv\b', r'\blosc\b', r'\bogc\b']
-    for p in patterns:
-        name = re.sub(p, '', name)
-    return name.strip()
+def safe_probability(p):
+    return clamp(p, 1e-6, 1.0 - 1e-6)
 
-@st.cache_data(ttl=1800)
-def fetch_espn_data(espn_code):
-    """Preluare meciuri reale live/programate din API-ul ESPN."""
-    url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{espn_code}/scoreboard"
-    try:
-        res = requests.get(url, timeout=10).json()
-        matches = []
-        teams_found = set()
-        
-        for ev in res.get('events', []):
-            comp = ev['competitions'][0]
-            teams = comp['competitors']
-            home = next(t['team']['displayName'] for t in teams if t['homeAway'] == 'home')
-            away = next(t['team']['displayName'] for t in teams if t['homeAway'] == 'away')
-            status = ev['status']['type']['shortDetail']
-            is_completed = ev['status']['type']['completed']
-            
-            teams_found.add(home)
-            teams_found.add(away)
-            
-            score_home = int(teams[0]['score']) if is_completed and 'score' in teams[0] else None
-            score_away = int(teams[1]['score']) if is_completed and 'score' in teams[1] else None
-            
-            matches.append({
-                "id": ev['id'],
-                "home": home,
-                "away": away,
-                "status": status,
-                "completed": is_completed,
-                "score_home": score_home,
-                "score_away": score_away
+def fair_odds(prob):
+    return 1.0 / safe_probability(prob)
+
+def implied_probability(odds):
+    if odds is None or odds <= 1.0:
+        return None
+    return 1.0 / odds
+
+def calculate_ev(prob, odds):
+    """Calcul Expected Value (EV) raportat la 1 unitate mizată."""
+    if odds is None or odds <= 1.0:
+        return None
+    return (prob * (odds - 1.0)) - (1.0 - prob)
+
+# ============================================================
+# PONDERARE TEMPORALĂ (TIME DECAY)
+# ============================================================
+
+def get_temporal_weight(match_date, ref_date=None):
+    """
+    Calculează greutatea unui meci în funcție de cât de recent a fost jucat.
+    Previne Data Leakage primind opțional un ref_date (data simulării).
+    """
+    if ref_date is None:
+        ref_date = datetime.now(timezone.utc).replace(tzinfo=None)
+    elif isinstance(ref_date, str):
+        ref_date = datetime.fromisoformat(ref_date.replace("Z", "+00:00")).replace(tzinfo=None)
+
+    if isinstance(match_date, str):
+        try:
+            match_date = datetime.fromisoformat(match_date.replace("Z", "+00:00")).replace(tzinfo=None)
+        except Exception:
+            return 0.5
+    elif isinstance(match_date, datetime):
+        match_date = match_date.replace(tzinfo=None)
+
+    age_days = max(0, (ref_date - match_date).days)
+    weight = math.exp(-age_days / DECAY_DAYS)
+    return clamp(weight, 0.05, 1.0)
+
+# ============================================================
+# CONSTRUIRE DATABASE REAL & LEAGUE AVERAGES (FĂRĂ MOCK DATA)
+# ============================================================
+
+def build_real_team_database(matches, ref_date=None):
+    """
+    Procesează meciurile reale. Elimină orice generație aleatorie.
+    """
+    teams = {}
+    home_goals, away_goals = [], []
+
+    for m in matches:
+        if not m.get("completed"):
+            continue
+
+        sh, sa = m.get("score_home"), m.get("score_away")
+        home, away = m.get("home"), m.get("away")
+
+        if None in (sh, sa, home, away):
+            continue
+
+        sh, sa = float(sh), float(sa)
+        date = m.get("date")
+        weight = get_temporal_weight(date, ref_date)
+
+        home_goals.append(sh)
+        away_goals.append(sa)
+
+        for team, venue, gf, ga in [(home, "home", sh, sa), (away, "away", sa, sh)]:
+            if team not in teams:
+                teams[team] = []
+            teams[team].append({
+                "venue": venue,
+                "goals_for": gf,
+                "goals_against": ga,
+                "weight": weight
             })
-        return matches, list(teams_found)
-    except Exception:
-        return [], []
 
-@st.cache_data(ttl=3600)
-def build_historical_team_database(espn_code, active_teams):
-    """Construiește baza de date xG combinând echipele active cu lista de rezervă."""
-    np.random.seed(42)
-    teams_mock_db = {}
-    
-    fallback_teams = STATIC_TEAMS_FALLBACK.get(espn_code, [])
-    all_teams = list(set(fallback_teams + active_teams))
+    avg_home = float(np.mean(home_goals)) if home_goals else 1.40
+    avg_away = float(np.mean(away_goals)) if away_goals else 1.15
 
-    for team in all_teams:
-        home_xg_scored = np.random.normal(1.55, 0.35, 10).clip(0.3, 3.5)
-        home_xg_conceded = np.random.normal(1.10, 0.30, 10).clip(0.2, 3.0)
-        away_xg_scored = np.random.normal(1.25, 0.35, 10).clip(0.2, 3.2)
-        away_xg_conceded = np.random.normal(1.40, 0.35, 10).clip(0.3, 3.5)
+    return teams, avg_home, avg_away
 
-        weights = np.exp(np.linspace(-0.5, 0, 10))
-        weights /= weights.sum()
+# ============================================================
+# CALCUL STRENGTH & SHRINKAGE
+# ============================================================
 
-        teams_mock_db[team] = {
-            "home_xg_scored": float(np.average(home_xg_scored, weights=weights)),
-            "home_xg_conceded": float(np.average(home_xg_conceded, weights=weights)),
-            "away_xg_scored": float(np.average(away_xg_scored, weights=weights)),
-            "away_xg_conceded": float(np.average(away_xg_conceded, weights=weights)),
-        }
+def calculate_team_strength(team, venue, database, league_avg):
+    matches = [m for m in database.get(team, []) if m["venue"] == venue]
 
-    avg_home_xg = float(np.mean([t["home_xg_scored"] for t in teams_mock_db.values()]))
-    avg_away_xg = float(np.mean([t["away_xg_scored"] for t in teams_mock_db.values()]))
+    if not matches:
+        return {"attack": 1.0, "defense": 1.0, "games": 0}
 
-    return teams_mock_db, avg_home_xg, avg_away_xg
+    gf = np.array([m["goals_for"] for m in matches])
+    ga = np.array([m["goals_against"] for m in matches])
+    weights = np.array([m["weight"] for m in matches])
 
-def match_team_strictly(input_name, team_database, threshold=0.35):
-    cleaned_input = clean_team_name(input_name)
+    total_w = np.sum(weights)
+    avg_gf = np.average(gf, weights=weights) if total_w > 0 else np.mean(gf)
+    avg_ga = np.average(ga, weights=weights) if total_w > 0 else np.mean(ga)
 
-    for db_team in team_database.keys():
-        if clean_team_name(db_team) == cleaned_input:
-            return db_team
+    # Bayesian Shrinkage către media ligii pentru stabilizare
+    games = len(matches)
+    shrink = games / (games + SHRINKAGE_GAMES)
 
-    best_match = None
-    best_score = 0.0
+    adj_gf = (shrink * avg_gf) + ((1.0 - shrink) * league_avg)
+    adj_ga = (shrink * avg_ga) + ((1.0 - shrink) * league_avg)
 
-    for db_team in team_database.keys():
-        cleaned_db = clean_team_name(db_team)
-        if cleaned_input in cleaned_db or cleaned_db in cleaned_input:
-            score = 0.85
-        else:
-            score = SequenceMatcher(None, cleaned_input, cleaned_db).ratio()
+    return {
+        "attack": float(adj_gf / league_avg),
+        "defense": float(adj_ga / league_avg),
+        "games": games
+    }
 
-        if score > best_score:
-            best_score = score
-            best_match = db_team
-
-    if best_score >= threshold:
-        return best_match
-    
-    return None
-
-def dixon_coles_tau(x, y, lambda_x, mu_y, rho=-0.13):
-    if x == 0 and y == 0:
-        return 1.0 - (lambda_x * mu_y * rho)
-    elif x == 0 and y == 1:
-        return 1.0 + (lambda_x * rho)
-    elif x == 1 and y == 0:
-        return 1.0 + (mu_y * rho)
-    elif x == 1 and y == 1:
-        return 1.0 - rho
-    else:
+def calculate_recent_form(team, database, last_n=5):
+    matches = database.get(team, [])
+    if not matches:
         return 1.0
 
-def calculate_dixon_coles_matrix(home_team, away_team, db, avg_home_xg, avg_away_xg, rho=-0.13, max_goals=12):
-    h_data = db[home_team]
-    a_data = db[away_team]
-
-    home_attack = h_data["home_xg_scored"] / avg_home_xg
-    away_defense = a_data["away_xg_conceded"] / avg_home_xg
-
-    away_attack = a_data["away_xg_scored"] / avg_away_xg
-    home_defense = h_data["home_xg_conceded"] / avg_away_xg
-
-    lambda_home = home_attack * away_defense * avg_home_xg
-    mu_away = away_attack * home_defense * avg_away_xg
-
-    matrix = np.zeros((max_goals, max_goals))
-
-    for x in range(max_goals):
-        for y in range(max_goals):
-            p_x = poisson.pmf(x, lambda_home)
-            p_y = poisson.pmf(y, mu_away)
-            tau = dixon_coles_tau(x, y, lambda_home, mu_away, rho)
-            matrix[x, y] = p_x * p_y * tau
-
-    matrix /= np.sum(matrix)
-    return lambda_home, mu_away, matrix
-
-def get_recommended_bet(prob_home, prob_draw, prob_away, p_over25, p_btts_yes, home_team, away_team):
-    """Calculează pariul cu cea mai înaltă probabilitate/valoare estimată."""
-    bets = [
-        (f"1 (Victorie {home_team})", prob_home, 1 / prob_home if prob_home > 0 else 0),
-        (f"2 (Victorie {away_team})", prob_away, 1 / prob_away if prob_away > 0 else 0),
-        ("1X (Șansă Dublă Gazde)", prob_home + prob_draw, 1 / (prob_home + prob_draw)),
-        ("X2 (Șansă Dublă Oaspeți)", prob_away + prob_draw, 1 / (prob_away + prob_draw)),
-        ("Peste 2.5 Goluri", p_over25, 1 / p_over25 if p_over25 > 0 else 0),
-        ("Sub 2.5 Goluri", 1.0 - p_over25, 1 / (1.0 - p_over25) if (1.0 - p_over25) > 0 else 0),
-        ("Ambele Marchează (BTTS DA)", p_btts_yes, 1 / p_btts_yes if p_btts_yes > 0 else 0)
-    ]
-    
-    # Filtrăm opțiunile cu cotă între 1.30 și 2.50 pentru siguranță și valoare optime
-    viable_bets = [b for b in bets if 1.30 <= b[2] <= 2.50]
-    if not viable_bets:
-        viable_bets = bets
-
-    best_bet = max(viable_bets, key=lambda item: item[1])
-    return best_bet
-
-# ==========================================
-# 4. INTERFAȚA STREAMLIT
-# ==========================================
-
-st.title("⚽ Model Avansat Predicții xG & Dixon-Coles")
-st.caption("Ajustare Home/Away • Time Decay Weights • Pariu Recomandat • Matrice 12x12")
-
-tab_predict, tab_backtest = st.tabs(["🔮 Predicții Meciuri", "🧪 Backtesting Model"])
-
-with tab_predict:
-    col_sel, col_res = st.columns([1, 2])
-
-    with col_sel:
-        st.subheader("⚙️ Selecție Meci")
-        selected_league_name = st.selectbox("Alege Competitia:", list(LEAGUES.keys()))
-        league_info = LEAGUES[selected_league_name]
-
-        espn_matches, active_teams = fetch_espn_data(league_info["espn"])
-        team_db, avg_h_xg, avg_a_xg = build_historical_team_database(league_info["espn"], active_teams)
-
-        if espn_matches:
-            match_options = [f"{m['home']} vs {m['away']} ({m['status']})" for m in espn_matches]
-            selected_match_idx = st.selectbox("Meciuri Programate / Astăzi (ESPN API):", range(len(match_options)), format_func=lambda x: match_options[x])
-            raw_home = espn_matches[selected_match_idx]['home']
-            raw_away = espn_matches[selected_match_idx]['away']
+    # Sortare după recență
+    sorted_m = sorted(matches, key=lambda x: x["weight"], reverse=True)[:last_n]
+    points = []
+    for m in sorted_m:
+        if m["goals_for"] > m["goals_against"]:
+            points.append(3)
+        elif m["goals_for"] == m["goals_against"]:
+            points.append(1)
         else:
-            st.warning("Nu s-au putut prelua meciurile curente prin API. Selectează manual:")
-            all_teams = sorted(list(team_db.keys()))
-            raw_home = st.selectbox("Gazde:", all_teams, index=0)
-            raw_away = st.selectbox("Oaspeți:", all_teams, index=min(1, len(all_teams)-1))
+            points.append(0)
 
-    with col_res:
-        home_matched = match_team_strictly(raw_home, team_db)
-        away_matched = match_team_strictly(raw_away, team_db)
+    avg_p = np.mean(points) if points else 1.36
+    # Normalizare între 0.80 și 1.20
+    return float(0.80 + (avg_p / 3.0) * 0.40)
 
-        if not home_matched or not away_matched:
-            missing = raw_home if not home_matched else raw_away
-            st.error(f"❌ **Eroare de potrivire!** Echipa '{missing}' nu a fost găsită în baza de date.")
-        elif home_matched == away_matched:
-            st.warning("Selectează două echipe diferite.")
-        else:
-            lambda_h, mu_a, matrix = calculate_dixon_coles_matrix(home_matched, away_matched, team_db, avg_h_xg, avg_a_xg)
+# ============================================================
+# DIXON-COLES CORE ENGINE
+# ============================================================
 
-            st.header(f"{home_matched} vs {away_matched}")
-            
-            m1, m2, m3 = st.columns(3)
-            m1.metric("xG Așteptat Gazde", f"{lambda_h:.2f}")
-            m2.metric("xG Așteptat Oaspeți", f"{mu_a:.2f}")
-            m3.metric("xG Total Meci", f"{lambda_h + mu_a:.2f}")
+def dixon_coles_tau(h, a, l_home, l_away, rho):
+    if h == 0 and a == 0:
+        return 1.0 - (l_home * l_away * rho)
+    elif h == 0 and a == 1:
+        return 1.0 + (l_home * rho)
+    elif h == 1 and a == 0:
+        return 1.0 + (l_away * rho)
+    elif h == 1 and a == 1:
+        return 1.0 - rho
+    return 1.0
 
-            st.divider()
+def build_dixon_coles_matrix(l_home, l_away, rho=DEFAULT_RHO, max_goals=MAX_GOALS):
+    matrix = np.zeros((max_goals + 1, max_goals + 1))
 
-            prob_home = np.sum(np.tril(matrix, -1))
-            prob_draw = np.sum(np.diag(matrix))
-            prob_away = np.sum(np.triu(matrix, 1))
+    for h in range(max_goals + 1):
+        for a in range(max_goals + 1):
+            base_p = poisson.pmf(h, l_home) * poisson.pmf(a, l_away)
+            tau = dixon_coles_tau(h, a, l_home, l_away, rho)
+            matrix[h, a] = base_p * tau
 
-            st.subheader("📊 Rezultat Final (1X2 & Cota Reală)")
-            c1, c2, c3 = st.columns(3)
-            c1.metric("1 (Victorie Gazde)", f"{prob_home*100:.1f}%", f"Cotă Reală: {1/prob_home:.2f}")
-            c2.metric("X (Egal)", f"{prob_draw*100:.1f}%", f"Cotă Reală: {1/prob_draw:.2f}")
-            c3.metric("2 (Victorie Oaspeți)", f"{prob_away*100:.1f}%", f"Cotă Reală: {1/prob_away:.2f}")
+    total = np.sum(matrix)
+    if total > 0:
+        matrix /= total
+    return matrix
 
-            # Calcul Pariu Recomandat
-            p_over25 = sum(matrix[x, y] for x in range(12) for y in range(12) if x + y > 2.5)
-            p_btts_yes = np.sum(matrix[1:, 1:])
-            rec_bet_name, rec_prob, rec_odds = get_recommended_bet(prob_home, prob_draw, prob_away, p_over25, p_btts_yes, home_matched, away_matched)
+def calculate_expected_goals(home_team, away_team, database, avg_home, avg_away):
+    h_str = calculate_team_strength(home_team, "home", database, avg_home)
+    a_str = calculate_team_strength(away_team, "away", database, avg_away)
 
-            st.divider()
-            st.subheader("💡 Pariu Recomandat de Model")
-            st.info(f"🎯 **Pariu Optim:** `{rec_bet_name}` | **Probabilitate:** `{rec_prob*100:.1f}%` | **Cotă Minimă Valoroasă:** `{rec_odds:.2f}`")
+    l_home = avg_home * h_str["attack"] * a_str["defense"]
+    l_away = avg_away * a_str["attack"] * h_str["defense"]
 
-            st.divider()
-            st.subheader("🎯 Piețe Extinse de Pariere")
+    # Ajustare moderată cu forma
+    h_form = calculate_recent_form(home_team, database)
+    a_form = calculate_recent_form(away_team, database)
 
-            t1, t2, t3 = st.tabs(["Goluri Over/Under", "BTTS / Șansă Dublă", "Scor Exact"])
+    l_home *= (0.85 + 0.15 * h_form)
+    l_away *= (0.85 + 0.15 * a_form)
 
-            with t1:
-                ou_data = {}
-                for threshold in [1.5, 2.5, 3.5, 4.5]:
-                    over_p = sum(matrix[x, y] for x in range(12) for y in range(12) if x + y > threshold)
-                    under_p = 1.0 - over_p
-                    ou_data[f"Peste/Sub {threshold}"] = (over_p, under_p)
+    return clamp(l_home, 0.2, 4.5), clamp(l_away, 0.2, 4.5)
 
-                col_o, col_u = st.columns(2)
-                for line, (p_over, p_under) in ou_data.items():
-                    col_o.write(f"**{line}**: Peste = `{p_over*100:.1f}%` (Cotă: `{1/p_over:.2f}`)")
-                    col_u.write(f"**{line}**: Sub = `{p_under*100:.1f}%` (Cotă: `{1/p_under:.2f}`)")
+# ============================================================
+# PIEȚE PROBABILISTICE & VALUE EVALUATION
+# ============================================================
 
-            with t2:
-                p_btts_no = 1.0 - p_btts_yes
+def extract_markets_from_matrix(matrix):
+    size = matrix.shape[0]
+    p_1 = float(np.sum(np.tril(matrix, -1)))
+    p_x = float(np.sum(np.diag(matrix)))
+    p_2 = float(np.sum(np.triu(matrix, 1)))
 
-                p_1x = prob_home + prob_draw
-                p_x2 = prob_away + prob_draw
-                p_12 = prob_home + prob_away
+    p_btts_yes = float(np.sum(matrix[1:, 1:]))
 
-                cb1, cb2 = st.columns(2)
-                cb1.write("### Both Teams To Score (BTTS)")
-                cb1.write(f"• **DA**: `{p_btts_yes*100:.1f}%` (Cotă: `{1/p_btts_yes:.2f}`)")
-                cb1.write(f"• **NU**: `{p_btts_no*100:.1f}%` (Cotă: `{1/p_btts_no:.2f}`)")
+    markets = {
+        "1": p_1, "X": p_x, "2": p_2,
+        "1X": p_1 + p_x, "X2": p_x + p_2, "12": p_1 + p_2,
+        "BTTS_YES": p_btts_yes, "BTTS_NO": 1.0 - p_btts_yes
+    }
 
-                cb2.write("### Șansă Dublă")
-                cb2.write(f"• **1X**: `{p_1x*100:.1f}%` (Cotă: `{1/p_1x:.2f}`)")
-                cb2.write(f"• **X2**: `{p_x2*100:.1f}%` (Cotă: `{1/p_x2:.2f}`)")
-                cb2.write(f"• **12**: `{p_12*100:.1f}%` (Cotă: `{1/p_12:.2f}`)")
+    for line in [0.5, 1.5, 2.5, 3.5, 4.5]:
+        over_p = 0.0
+        for h in range(size):
+            for a in range(size):
+                if h + a > line:
+                    over_p += matrix[h, a]
+        markets[f"OVER_{line}"] = float(over_p)
+        markets[f"UNDER_{line}"] = float(1.0 - over_p)
 
-            with t3:
-                exact_scores = [((x, y), matrix[x, y]) for x in range(6) for y in range(6)]
-                exact_scores.sort(key=lambda item: item[1], reverse=True)
+    return markets
 
-                st.write("**Top 5 Scoruri Exacte Estimate:**")
-                for (sc_h, sc_a), p_sc in exact_scores[:5]:
-                    st.write(f"• **{sc_h} - {sc_a}** : Probabilitate `{p_sc*100:.1f}%` (Cotă reală: `{1/p_sc:.2f}`)")
+def evaluate_value_bet(market_key, model_prob, bookmaker_odds):
+    if bookmaker_odds is None or bookmaker_odds <= 1.0:
+        return None
 
-with tab_backtest:
-    st.header("🧪 Backtesting Model pe Meciuri Finalizate")
-    league_back = st.selectbox("Liga pentru Backtest:", list(LEAGUES.keys()), key="back_league")
-    matches_back, active_b = fetch_espn_data(LEAGUES[league_back]["espn"])
-    db_back, avg_h_b, avg_a_b = build_historical_team_database(LEAGUES[league_back]["espn"], active_b)
+    implied_p = implied_probability(bookmaker_odds)
+    ev = calculate_ev(model_prob, bookmaker_odds)
+    edge = model_prob - implied_p
 
-    completed_matches = [m for m in matches_back if m['completed']]
+    is_value = (edge >= MIN_EDGE) and (ev >= MIN_EV)
 
-    if not completed_matches:
-        st.info("Nu există meciuri finalizate recent disponibile în API pentru a rula un backtest instant.")
-    else:
-        brier_scores = []
-        for match in completed_matches:
-            h_team = match_team_strictly(match['home'], db_back)
-            a_team = match_team_strictly(match['away'], db_back)
+    return {
+        "market": market_key,
+        "model_prob": model_prob,
+        "fair_odds": fair_odds(model_prob),
+        "bookie_odds": bookmaker_odds,
+        "implied_prob": implied_p,
+        "edge": edge,
+        "ev": ev,
+        "is_value": is_value
+    }
 
-            if h_team and a_team and match['score_home'] is not None:
-                _, _, mat = calculate_dixon_coles_matrix(h_team, a_team, db_back, avg_h_b, avg_a_b)
-                sh, sa = match['score_home'], match['score_away']
-                actual = 0 if sh > sa else (1 if sh == sa else 2)
+# ============================================================
+# STRICT BACKTESTING FRAMEWORK (PREVENIRE DATA LEAKAGE)
+# ============================================================
 
-                p_h = float(np.sum(np.tril(mat, -1)))
-                p_d = float(np.sum(np.diag(mat)))
-                p_a = float(np.sum(np.triu(mat, 1)))
+def run_leakage_free_backtest(historical_matches):
+    """
+    Execută un backtest unde la fiecare meci se folosesc
+    EXCLUSIV meciurile jucate ANTERIOR datei meciului analizat.
+    """
+    # Sortare cronologică
+    sorted_matches = sorted(
+        [m for m in historical_matches if m.get("completed")],
+        key=lambda x: x["date"]
+    )
 
-                probs = [p_h, p_d, p_a]
-                obs = [1 if i == actual else 0 for i in range(3)]
-                brier = sum((probs[i] - obs[i])**2 for i in range(3))
-                brier_scores.append(brier)
+    brier_scores = []
+    log_losses = []
+    evaluated_bets = []
 
-                res_str = "1 (Gazde)" if actual == 0 else ("X (Egal)" if actual == 1 else "2 (Oaspeți)")
-                st.write(f"• **{match['home']} {sh} - {sa} {match['away']}** | Rezultat: `{res_str}` | Predicție (1: `{p_h*100:.0f}%`, X: `{p_d*100:.0f}%`, 2: `{p_a*100:.0f}%`) | Brier Score: `{brier:.3f}`")
+    for i in range(20, len(sorted_matches)):  # Pornim după un minim de meciuri
+        target = sorted_matches[i]
+        past_matches = sorted_matches[:i]
 
-        if brier_scores:
-            st.success(f"**Brier Score Mediu: {np.mean(brier_scores):.4f}**")
+        ref_date = target["date"]
+        db, avg_h, avg_a = build_real_team_database(past_matches, ref_date=ref_date)
+
+        h_team, a_team = target["home"], target["away"]
+        if h_team not in db or a_team not in db:
+            continue
+
+        l_h, l_a = calculate_expected_goals(h_team, a_team, db, avg_h, avg_a)
+        matrix = build_dixon_coles_matrix(l_h, l_a)
+        markets = extract_markets_from_matrix(matrix)
+
+        # Rezultat real (0: 1, 1: X, 2: 2)
+        sh, sa = float(target["score_home"]), float(target["score_away"])
+        actual_idx = 0 if sh > sa else (1 if sh == sa else 2)
+        probs_1x2 = [markets["1"], markets["X"], markets["2"]]
+
+        # Metrics
+        brier = sum((probs_1x2[j] - (1 if j == actual_idx else 0)) ** 2 for j in range(3))
+        log_loss = -math.log(safe_probability(probs_1x2[actual_idx]))
+
+        brier_scores.append(brier)
+        log_losses.append(log_loss)
+
+    return {
+        "mean_brier": float(np.mean(brier_scores)) if brier_scores else None,
+        "mean_log_loss": float(np.mean(log_losses)) if log_losses else None,
+        "evaluated_matches": len(brier_scores)
+    }
