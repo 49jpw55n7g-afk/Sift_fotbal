@@ -1,6 +1,6 @@
 import json
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 import requests
 import streamlit as st
 import numpy as np
@@ -8,26 +8,18 @@ from scipy.stats import poisson
 
 st.set_page_config(page_title="Predicții xG Meciuri", page_icon="⚽", layout="wide")
 
-st.title("⚽ Predicții Automate xG - Meciurile Zilei (Live & Programate)")
+st.title("⚽ Predicții Automate xG - Meciurile Zilei")
 
 LEAGUES = {
+    "🇷🇴 Superliga (România)": "ROU_1",
     "🇮🇹 Serie A (Italia)": "Serie_A",
     "🇪🇸 La Liga (Spania)": "La_Liga",
-    "🇷🇴 Superliga (România)": "ROU_1",
     "🏴󠁧󠁢󠁥󠁮󠁧󠁿 Premier League (Anglia)": "EPL",
     "🇩🇪 Bundesliga (Germania)": "Bundesliga",
     "🇫🇷 Ligue 1 (Franța)": "Ligue_1"
 }
 
-# Program Runda Curentă / Azi Superliga România
-ROMANIA_FIXTURES = [
-    {"h": "Universitatea Craiova", "a": "U Cluj", "time": "Azi - 20:30", "status": "AZI"},
-    {"h": "FC Voluntari", "a": "FC Argeș Pitești", "time": "Azi - Finalizat", "status": "JUCAT"},
-    {"h": "FCSB", "a": "Dinamo București", "time": "Etapa Curentă - 20:30", "status": "VIITOR"},
-    {"h": "CFR Cluj", "a": "FC Botoșani", "time": "Etapa Curentă - 18:00", "status": "VIITOR"},
-    {"h": "Rapid București", "a": "Farul Constanța", "time": "Etapa Curentă - 20:00", "status": "VIITOR"}
-]
-
+# Date xG de bază pentru echipele din România
 ROMANIA_TEAMS = {
     "FCSB": {"avg_xg_scored": 1.65, "avg_xg_conceded": 1.10},
     "CFR Cluj": {"avg_xg_scored": 1.55, "avg_xg_conceded": 1.05},
@@ -40,30 +32,64 @@ ROMANIA_TEAMS = {
     "Dinamo București": {"avg_xg_scored": 1.20, "avg_xg_conceded": 1.30},
     "FC Botoșani": {"avg_xg_scored": 1.00, "avg_xg_conceded": 1.45},
     "FC Voluntari": {"avg_xg_scored": 1.10, "avg_xg_conceded": 1.25},
-    "FC Argeș Pitești": {"avg_xg_scored": 1.05, "avg_xg_conceded": 1.30}
+    "Oțelul Galați": {"avg_xg_scored": 1.10, "avg_xg_conceded": 1.05},
+    "Petrolul Ploiești": {"avg_xg_scored": 1.05, "avg_xg_conceded": 1.25},
+    "FC Hermannstadt": {"avg_xg_scored": 1.15, "avg_xg_conceded": 1.25}
 }
 
-@st.cache_data(ttl=600)
-def get_league_data(league_code):
+@st.cache_data(ttl=1800)
+def fetch_live_matches(league_code):
+    """Preluare meciuri live/de azi via API public gratuit"""
     if league_code == "ROU_1":
-        return "LOCAL", ROMANIA_FIXTURES
+        # API live gratuit pentru meciurile din Superliga
+        url = "https://site.api.espn.com/apis/site/v2/sports/soccer/rou.1/scoreboard"
+    else:
+        # Mapping API ESPN pentru Top 5 Ligi
+        espn_codes = {
+            "Serie_A": "ita.1",
+            "La_Liga": "esp.1",
+            "EPL": "eng.1",
+            "Bundesliga": "ger.1",
+            "Ligue_1": "fra.1"
+        }
+        url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{espn_codes[league_code]}/scoreboard"
 
+    try:
+        res = requests.get(url, timeout=10).json()
+        events = res.get('events', [])
+        
+        matches = []
+        for ev in events:
+            status = ev['status']['type']['shortDetail']
+            teams = ev['competitions'][0]['competitors']
+            
+            home = teams[0]['team']['displayName'] if teams[0]['homeAway'] == 'home' else teams[1]['team']['displayName']
+            away = teams[1]['team']['displayName'] if teams[0]['homeAway'] == 'home' else teams[0]['team']['displayName']
+            
+            matches.append({
+                "home": home,
+                "away": away,
+                "status": status
+            })
+        return matches
+    except Exception:
+        return []
+
+@st.cache_data(ttl=3600)
+def get_understat_data(league_code):
+    if league_code == "ROU_1":
+        return "LOCAL"
     url = f"https://understat.com/league/{league_code}"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
         response = requests.get(url, headers=headers, timeout=10)
         teams_match = re.search(r"teamsData\s*=\s*JSON\.parse\('([^']+)'\)", response.text)
-        dates_match = re.search(r"datesData\s*=\s*JSON\.parse\('([^']+)'\)", response.text)
-        
-        if not teams_match or not dates_match:
-            return None, None
-            
+        if not teams_match:
+            return None
         teams_json = bytes(teams_match.group(1), 'utf-8').decode('unicode_escape')
-        dates_json = bytes(dates_match.group(1), 'utf-8').decode('unicode_escape')
-        
-        return json.loads(teams_json), json.loads(dates_json)
+        return json.loads(teams_json)
     except Exception:
-        return None, None
+        return None
 
 def calculate_team_stats(teams_data):
     if teams_data == "LOCAL":
@@ -94,11 +120,13 @@ def calculate_team_stats(teams_data):
     return stats, league_avg_xg
 
 def calculate_match_probabilities(home_team, away_team, stats, league_avg):
-    home_attack = stats[home_team]["avg_xg_scored"] / league_avg
-    home_defense = stats[home_team]["avg_xg_conceded"] / league_avg
-    
-    away_attack = stats[away_team]["avg_xg_scored"] / league_avg
-    away_defense = stats[away_team]["avg_xg_conceded"] / league_avg
+    h_stat = stats.get(home_team, {"avg_xg_scored": 1.20, "avg_xg_conceded": 1.20})
+    a_stat = stats.get(away_team, {"avg_xg_scored": 1.20, "avg_xg_conceded": 1.20})
+
+    home_attack = h_stat["avg_xg_scored"] / league_avg
+    home_defense = h_stat["avg_xg_conceded"] / league_avg
+    away_attack = a_stat["avg_xg_scored"] / league_avg
+    away_defense = a_stat["avg_xg_conceded"] / league_avg
     
     exp_home_goals = home_attack * away_defense * league_avg * 1.10
     exp_away_goals = away_attack * home_defense * league_avg
@@ -123,42 +151,28 @@ with col_l:
     selected_league_label = st.selectbox("Alege Liga:", list(LEAGUES.keys()))
     league_code = LEAGUES[selected_league_label]
 
-    teams_data, dates_data = get_league_data(league_code)
+    teams_data = get_understat_data(league_code)
+    live_matches = fetch_live_matches(league_code)
 
     if teams_data:
         stats, league_avg = calculate_team_stats(teams_data)
         
-        st.subheader("📌 Selectează Meciul")
+        st.subheader("📌 Meciuri Programate / Astăzi")
         
-        match_options = []
-        parsed_matches = []
-
-        if league_code == "ROU_1":
-            for m in dates_data:
-                match_options.append(f"[{m['status']}] {m['h']} vs {m['a']} ({m['time']})")
-                parsed_matches.append((m['h'], m['a']))
-        elif dates_data:
-            # Extragere meciuri din ultimele 20 de evenimente (inclusiv meciurile de azi)
-            recent_and_upcoming = dates_data[-20:]
-            
-            for m in recent_and_upcoming:
-                dt = m.get('datetime', '')[:16].replace(' ', ' ora ')
-                is_done = "JUCAT" if m.get('isResult') else "PROGRAMAT/LIVE"
-                
-                match_options.append(f"[{is_done}] {m['h']['title']} vs {m['a']['title']} ({dt})")
-                parsed_matches.append((m['h']['title'], m['a']['title']))
-
-        if match_options:
-            selected_match_str = st.selectbox("Meciuri Curente / Programate:", match_options, index=len(match_options)-1 if len(match_options)>0 else 0)
-            idx = match_options.index(selected_match_str)
-            home_team, away_team = parsed_matches[idx]
+        if live_matches:
+            options = [f"[{m['status']}] {m['home']} vs {m['away']}" for m in live_matches]
+            selected_str = st.selectbox("Alege Meciul:", options)
+            idx = options.index(selected_str)
+            home_team = live_matches[idx]['home']
+            away_team = live_matches[idx]['away']
         else:
+            st.info("Nu sunt meciuri oficiale detectate azi în această ligă. Selectează echipele manual:")
             team_list = sorted(list(stats.keys()))
             home_team = st.selectbox("Echipa Gazdă:", team_list, index=0)
             away_team = st.selectbox("Echipa Oaspete:", team_list, index=min(1, len(team_list)-1))
 
 with col_m:
-    if teams_data and stats and 'home_team' in locals() and home_team != away_team:
+    if teams_data and stats and 'home_team' in locals():
         exp_home, exp_away, p_home, p_draw, p_away, matrix = calculate_match_probabilities(
             home_team, away_team, stats, league_avg
         )
@@ -171,9 +185,9 @@ with col_m:
         
         st.subheader("📊 Probabilități Rezultat Final (1X2)")
         col_1, col_x, col_2 = st.columns(3)
-        col_1.metric("1 (Gazde)", f"{p_home*100:.1f}%", f"Cotă Reală: {1/p_home:.2f}" if p_home > 0 else "")
-        col_x.metric("X (Egal)", f"{p_draw*100:.1f}%", f"Cotă Reală: {1/p_draw:.2f}" if p_draw > 0 else "")
-        col_2.metric("2 (Oaspeți)", f"{p_away*100:.1f}%", f"Cotă Reală: {1/p_away:.2f}" if p_away > 0 else "")
+        col_1.metric("1 (Gazde)", f"{p_home*100:.1f}%", f"Cotă: {1/p_home:.2f}" if p_home > 0 else "")
+        col_x.metric("X (Egal)", f"{p_draw*100:.1f}%", f"Cotă: {1/p_draw:.2f}" if p_draw > 0 else "")
+        col_2.metric("2 (Oaspeți)", f"{p_away*100:.1f}%", f"Cotă: {1/p_away:.2f}" if p_away > 0 else "")
         
         st.subheader("⚽ Goluri Totale (Peste/Sub 2.5)")
         over_25_prob = 1 - sum(matrix[i, j] for i in range(3) for j in range(3) if i + j <= 2)
