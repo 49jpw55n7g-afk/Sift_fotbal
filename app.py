@@ -17,7 +17,6 @@ st.set_page_config(
     layout="wide"
 )
 
-# Încercăm citirea din Streamlit Secrets dacă există
 saved_key = ""
 try:
     if "API_KEY" in st.secrets:
@@ -31,14 +30,6 @@ if "api_key" not in st.session_state:
 MAX_GOALS = 10
 DECAY_DAYS = 180
 SHRINKAGE_GAMES = 8
-
-COMPETITIONS = {
-    2: "UEFA Champions League",
-    39: "Premier League",
-    140: "La Liga",
-    135: "Serie A",
-    78: "Bundesliga"
-}
 
 # ============================================================
 # 2. HELPERE ȘI ENGINE MATEMATIC
@@ -173,16 +164,29 @@ def get_top_correct_scores(matrix, top_n=5):
                 "Scor Corect": f"{h} - {a}",
                 "Probabilitate": f"{p*100:.1f}%",
                 "Cotă Fair": f"{fair_odds(p):.2f}",
-                "raw_p": p
+                "raw_p": p,
+                "h_goals": h,
+                "a_goals": a
             })
     scores = sorted(scores, key=lambda x: x["raw_p"], reverse=True)[:top_n]
-    for s in scores:
-        del s["raw_p"]
     return scores
 
-def get_best_value_pick(markets):
+def get_best_value_pick(markets, top_score):
+    """
+    Selectează varianta optimală eliminând contradicțiile logice cu scorul cel mai probabil.
+    """
+    h_goals = top_score["h_goals"]
+    a_goals = top_score["a_goals"]
+    both_scored = (h_goals > 0 and a_goals > 0)
+
     candidates = []
     for market, prob in markets.items():
+        # Filtru de consistență: elimină NG dacă ambele echipe marchează în scorul principal
+        if both_scored and "NG" in market:
+            continue
+        if not both_scored and market == "GG (Ambele Marchează)":
+            continue
+
         odds = fair_odds(prob)
         if prob >= 0.45 and odds >= 1.35:
             value_score = prob * (odds ** 1.1)
@@ -192,7 +196,9 @@ def get_best_value_pick(markets):
         best = max(candidates, key=lambda x: x[3])
         return best[0], best[1], best[2]
     else:
-        best_market, best_prob = max(markets.items(), key=lambda x: x[1])
+        # Fallback fără opțiuni contradictorii
+        valid_mkts = {k: v for k, v in markets.items() if not (both_scored and "NG" in k)}
+        best_market, best_prob = max(valid_mkts.items(), key=lambda x: x[1])
         return best_market, best_prob, fair_odds(best_prob)
 
 # ============================================================
@@ -232,22 +238,24 @@ def fetch_data_api_sports(api_key, season_year):
     except Exception:
         pass
 
-    try:
-        url_hist = f"https://v3.football.api-sports.io/fixtures?league=2&season={season_year}&last=30"
-        res_h = requests.get(url_hist, headers=headers, timeout=8)
-        if res_h.status_code == 200:
-            for item in res_h.json().get("response", []):
-                status = item.get("fixture", {}).get("status", {}).get("short")
-                if status in ["FT", "AET", "PEN"]:
-                    historical.append({
-                        "home": item.get("teams", {}).get("home", {}).get("name"),
-                        "away": item.get("teams", {}).get("away", {}).get("name"),
-                        "score_home": item.get("goals", {}).get("home"),
-                        "score_away": item.get("goals", {}).get("away"),
-                        "date": str(item.get("fixture", {}).get("date", ""))[:10]
-                    })
-    except Exception:
-        pass
+    # Descărcare meciuri recente generale pentru baza de date
+    for comp_id in [2, 39, 140, 135, 78]:
+        try:
+            url_hist = f"https://v3.football.api-sports.io/fixtures?league={comp_id}&season={season_year}&last=20"
+            res_h = requests.get(url_hist, headers=headers, timeout=8)
+            if res_h.status_code == 200:
+                for item in res_h.json().get("response", []):
+                    status = item.get("fixture", {}).get("status", {}).get("short")
+                    if status in ["FT", "AET", "PEN"]:
+                        historical.append({
+                            "home": item.get("teams", {}).get("home", {}).get("name"),
+                            "away": item.get("teams", {}).get("away", {}).get("name"),
+                            "score_home": item.get("goals", {}).get("home"),
+                            "score_away": item.get("goals", {}).get("away"),
+                            "date": str(item.get("fixture", {}).get("date", ""))[:10]
+                        })
+        except Exception:
+            pass
 
     return historical, upcoming
 
@@ -259,7 +267,6 @@ st.title("⚡ Quantum Analytics Engine")
 
 with st.sidebar:
     st.header("⚙️ Setări API")
-    
     input_key = st.text_input("🔑 Introdu Cheia API:", value=st.session_state["api_key"], type="password")
     
     if st.button("✅ Activează Cheia"):
@@ -275,7 +282,7 @@ with st.sidebar:
 if not st.session_state["api_key"]:
     st.info("👈 Introdu Cheia API în meniul din stânga și apasă pe **Activează Cheia**.")
 else:
-    with st.spinner("🔄 Se descarcă meciurile..."):
+    with st.spinner("🔄 Se descarcă meciurile și datele istorice..."):
         historical_matches, upcoming_matches = fetch_data_api_sports(st.session_state["api_key"], season_input)
 
     db, avg_home, avg_away = build_real_team_database(historical_matches)
@@ -303,14 +310,23 @@ else:
                 mkts = extract_all_markets(matrix)
                 top_scores = get_top_correct_scores(matrix, top_n=5)
 
-                opt_market, opt_prob, opt_odds = get_best_value_pick(mkts)
+                opt_market, opt_prob, opt_odds = get_best_value_pick(mkts, top_scores[0])
+
+                # Curățare obiect top_scores pentru afișare tabelară
+                clean_top_scores = []
+                for ts in top_scores:
+                    clean_top_scores.append({
+                        "Scor Corect": ts["Scor Corect"],
+                        "Probabilitate": ts["Probabilitate"],
+                        "Cotă Fair": ts["Cotă Fair"]
+                    })
 
                 analyzed_matches.append({
                     "match": m,
                     "l_h": l_h,
                     "l_a": l_a,
                     "markets": mkts,
-                    "top_scores": top_scores,
+                    "top_scores": clean_top_scores,
                     "opt_market": opt_market,
                     "opt_prob": opt_prob,
                     "opt_odds": opt_odds
@@ -319,7 +335,7 @@ else:
                     "Competiție": m["league"],
                     "Meci": f"{m['home']} vs {m['away']}",
                     "Pariu Value": opt_market,
-                    "Scor Cel Mai Probabil": top_scores[0]["Scor Corect"],
+                    "Scor Cel Mai Probabil": clean_top_scores[0]["Scor Corect"],
                     "Încredere": f"{opt_prob*100:.1f}%",
                     "Cotă Fair": f"{opt_odds:.2f}",
                     "prob": opt_prob,
