@@ -12,7 +12,7 @@ from datetime import datetime, timezone, timedelta
 # ============================================================
 
 st.set_page_config(
-    page_title="Quantum Analytics Engine — Score & Value Edition",
+    page_title="Quantum Analytics Engine — Correct Score & Value Markets",
     page_icon="⚡",
     layout="wide"
 )
@@ -30,7 +30,7 @@ COMPETITIONS = {
 }
 
 if "api_key" not in st.session_state:
-    st.session_state["api_key"] = "060636ad2ecb5e03ab31226beffecee1"
+    st.session_state["api_key"] = ""
 
 # ============================================================
 # 2. HELPERE ȘI ENGINE MATEMATIC
@@ -126,6 +126,11 @@ def extract_all_markets(matrix):
     p_2 = float(np.sum(np.triu(matrix, 1)))
     p_btts = float(np.sum(matrix[1:, 1:]))
 
+    # Calculare sigură combinată (Solist + GG)
+    p_1_gg = float(sum(matrix[h, a] for h in range(1, size) for a in range(1, size) if h > a))
+    p_2_gg = float(sum(matrix[h, a] for h in range(1, size) for a in range(1, size) if a > h))
+    p_x_gg = float(sum(matrix[i, i] for i in range(1, size)))
+
     markets = {
         "1 (Gazde)": p_1,
         "X (Egal)": p_x,
@@ -135,9 +140,9 @@ def extract_all_markets(matrix):
         "12 (Fără Egal)": p_1 + p_2,
         "GG (Ambele Marchează)": p_btts,
         "NG (Nu Marchează Ambele)": 1.0 - p_btts,
-        "1 & GG": float(np.sum(matrix[1:, 1:] * np.tril(np.ones((size, size)), -1))),
-        "2 & GG": float(np.sum(matrix[1:, 1:] * np.triu(np.ones((size, size)), 1))),
-        "X & GG": float(np.sum(np.diag(matrix)[1:]))
+        "1 & GG": p_1_gg,
+        "2 & GG": p_2_gg,
+        "X & GG": p_x_gg
     }
 
     for line in [0.5, 1.5, 2.5, 3.5, 4.5, 5.5]:
@@ -153,9 +158,6 @@ def extract_all_markets(matrix):
     return markets
 
 def get_top_correct_scores(matrix, top_n=5):
-    """
-    Calculează cele mai probabile scoruri corecte pe baza matricei Poisson / Dixon-Coles.
-    """
     scores = []
     for h in range(6):
         for a in range(6):
