@@ -12,7 +12,7 @@ from datetime import datetime, timezone, timedelta
 # ============================================================
 
 st.set_page_config(
-    page_title="Quantum Analytics Engine",
+    page_title="Quantum Analytics Engine - Ultra",
     page_icon="⚡",
     layout="wide"
 )
@@ -32,7 +32,7 @@ DECAY_DAYS = 180
 SHRINKAGE_GAMES = 8
 
 # ============================================================
-# 2. HELPERE ȘI ENGINE MATEMATIC
+# 2. HELPERE ȘI ENGINE MATEMATIC EXTINS
 # ============================================================
 
 def clamp(x, low, high):
@@ -85,9 +85,14 @@ def build_real_team_database(matches):
 
 def calculate_expected_goals(home_team, away_team, database, avg_home, avg_away):
     def get_str(team, venue, league_avg):
-        matches = [m for m in database.get(team, []) if m["venue"] == venue]
+        matches = []
+        for t_name, t_matches in database.items():
+            if team.lower() in t_name.lower() or t_name.lower() in team.lower():
+                matches.extend([m for m in t_matches if m["venue"] == venue])
+        
         if not matches:
             return 1.0, 1.0
+            
         gf = np.array([m["goals_for"] for m in matches])
         ga = np.array([m["goals_against"] for m in matches])
         weights = np.array([m["weight"] for m in matches])
@@ -117,41 +122,74 @@ def build_dixon_coles_matrix(l_home, l_away):
     total = np.sum(matrix)
     return matrix / total if total > 0 else matrix
 
-def extract_all_markets(matrix):
+def extract_all_markets(matrix, l_home, l_away):
     size = matrix.shape[0]
     
+    # 1. Piețe Principale 1X2 & Șansă Dublă
     p_1 = float(np.sum(np.tril(matrix, -1)))
     p_x = float(np.sum(np.diag(matrix)))
     p_2 = float(np.sum(np.triu(matrix, 1)))
     p_btts = float(np.sum(matrix[1:, 1:]))
 
+    # 2. Combouri 1X2 + GG / NG
     p_1_gg = float(sum(matrix[h, a] for h in range(1, size) for a in range(1, size) if h > a))
     p_2_gg = float(sum(matrix[h, a] for h in range(1, size) for a in range(1, size) if a > h))
     p_x_gg = float(sum(matrix[i, i] for i in range(1, size)))
 
     markets = {
+        # Soliști
         "1 (Gazde)": p_1,
         "X (Egal)": p_x,
         "2 (Oaspeți)": p_2,
         "1X (Șansă Dublă)": p_1 + p_x,
         "X2 (Șansă Dublă)": p_x + p_2,
         "12 (Fără Egal)": p_1 + p_2,
+        
+        # Ambele Marchează (GG)
         "GG (Ambele Marchează)": p_btts,
         "NG (Nu Marchează Ambele)": 1.0 - p_btts,
+        
+        # Combouri
         "1 & GG": p_1_gg,
         "2 & GG": p_2_gg,
-        "X & GG": p_x_gg
+        "X & GG": p_x_gg,
+        "1 & NG": p_1 - p_1_gg,
+        "2 & NG": p_2 - p_2_gg,
+        
+        # Draw No Bet
+        "DNB Gazde": p_1 / (p_1 + p_2) if (p_1 + p_2) > 0 else 0.5,
+        "DNB Oaspeți": p_2 / (p_1 + p_2) if (p_1 + p_2) > 0 else 0.5,
     }
 
+    # 3. Linii Total Goluri Meci (Peste / Sub)
     for line in [0.5, 1.5, 2.5, 3.5, 4.5, 5.5]:
         over_p = sum(matrix[h, a] for h in range(size) for a in range(size) if h + a > line)
         markets[f"Peste {line} Goluri"] = float(over_p)
         markets[f"Sub {line} Goluri"] = float(1.0 - over_p)
 
+    # 4. Total Goluri Echipa Gazdă / Oaspeți
+    for line in [0.5, 1.5, 2.5]:
+        p_h_over = sum(matrix[h, a] for h in range(size) for a in range(size) if h > line)
+        p_a_over = sum(matrix[h, a] for h in range(size) for a in range(size) if a > line)
+        markets[f"Gazde Peste {line} Goluri"] = float(p_h_over)
+        markets[f"Gazde Sub {line} Goluri"] = float(1.0 - p_h_over)
+        markets[f"Oaspeți Peste {line} Goluri"] = float(p_a_over)
+        markets[f"Oaspeți Sub {line} Goluri"] = float(1.0 - p_a_over)
+
+    # 5. Handicap European & Asiatic Simplu
     markets["Gazde -1.5"] = float(sum(matrix[h, a] for h in range(size) for a in range(size) if h - a > 1.5))
     markets["Oaspeți +1.5"] = float(sum(matrix[h, a] for h in range(size) for a in range(size) if a - h < 1.5))
     markets["Oaspeți -1.5"] = float(sum(matrix[h, a] for h in range(size) for a in range(size) if a - h > 1.5))
     markets["Gazde +1.5"] = float(sum(matrix[h, a] for h in range(size) for a in range(size) if h - a < 1.5))
+
+    # 6. Estimări Repriza 1 (Aproximare pe distribuție 45% goluri în R1)
+    l_h_r1, l_a_r1 = l_home * 0.45, l_away * 0.45
+    p_r1_over15 = 1.0 - (poisson.pmf(0, l_h_r1+l_a_r1) + poisson.pmf(1, l_h_r1+l_a_r1))
+    p_r1_over05 = 1.0 - poisson.pmf(0, l_h_r1+l_a_r1)
+    
+    markets["Repriza 1 - Peste 0.5 Goluri"] = float(p_r1_over05)
+    markets["Repriza 1 - Peste 1.5 Goluri"] = float(p_r1_over15)
+    markets["Repriza 1 - Sub 1.5 Goluri"] = float(1.0 - p_r1_over15)
 
     return markets
 
@@ -172,33 +210,38 @@ def get_top_correct_scores(matrix, top_n=5):
     return scores
 
 def get_best_value_pick(markets, top_score):
-    """
-    Selectează varianta optimală eliminând contradicțiile logice cu scorul cel mai probabil.
-    """
     h_goals = top_score["h_goals"]
     a_goals = top_score["a_goals"]
     both_scored = (h_goals > 0 and a_goals > 0)
+    total_expected_goals = h_goals + a_goals
 
     candidates = []
     for market, prob in markets.items():
-        # Filtru de consistență: elimină NG dacă ambele echipe marchează în scorul principal
+        # Filtru de consistență logică
         if both_scored and "NG" in market:
             continue
         if not both_scored and market == "GG (Ambele Marchează)":
             continue
+            
+        if total_expected_goals < 3 and "Peste 2.5" in market:
+            continue
+        if total_expected_goals >= 3 and "Sub 2.5" in market:
+            continue
 
         odds = fair_odds(prob)
-        if prob >= 0.45 and odds >= 1.35:
-            value_score = prob * (odds ** 1.1)
+        
+        # Filtru de cotă sustenabilă
+        if prob >= 0.42 and (1.38 <= odds <= 2.45):
+            penalty = 0.90 if "Goluri" in market and "Peste 0.5" not in market else 1.0
+            value_score = prob * (odds ** 1.05) * penalty
             candidates.append((market, prob, odds, value_score))
 
     if candidates:
         best = max(candidates, key=lambda x: x[3])
         return best[0], best[1], best[2]
     else:
-        # Fallback fără opțiuni contradictorii
-        valid_mkts = {k: v for k, v in markets.items() if not (both_scored and "NG" in k)}
-        best_market, best_prob = max(valid_mkts.items(), key=lambda x: x[1])
+        solist_mkts = {k: v for k, v in markets.items() if k in ["1 (Gazde)", "2 (Oaspeți)", "1X (Șansă Dublă)", "X2 (Șansă Dublă)", "GG (Ambele Marchează)"]}
+        best_market, best_prob = max(solist_mkts.items(), key=lambda x: x[1])
         return best_market, best_prob, fair_odds(best_prob)
 
 # ============================================================
@@ -238,10 +281,9 @@ def fetch_data_api_sports(api_key, season_year):
     except Exception:
         pass
 
-    # Descărcare meciuri recente generale pentru baza de date
     for comp_id in [2, 39, 140, 135, 78]:
         try:
-            url_hist = f"https://v3.football.api-sports.io/fixtures?league={comp_id}&season={season_year}&last=20"
+            url_hist = f"https://v3.football.api-sports.io/fixtures?league={comp_id}&season={season_year}&last=25"
             res_h = requests.get(url_hist, headers=headers, timeout=8)
             if res_h.status_code == 200:
                 for item in res_h.json().get("response", []):
@@ -263,7 +305,7 @@ def fetch_data_api_sports(api_key, season_year):
 # 4. INTERFAȚĂ UTILIZATOR
 # ============================================================
 
-st.title("⚡ Quantum Analytics Engine")
+st.title("⚡ Quantum Analytics Engine - Ultra")
 
 with st.sidebar:
     st.header("⚙️ Setări API")
@@ -272,7 +314,7 @@ with st.sidebar:
     if st.button("✅ Activează Cheia"):
         if input_key.strip():
             st.session_state["api_key"] = input_key.strip()
-            st.success("Cheie activată cu succes!")
+            st.success("Cheie activată!")
             st.rerun()
         else:
             st.warning("Introdu o cheie API validă.")
@@ -282,7 +324,7 @@ with st.sidebar:
 if not st.session_state["api_key"]:
     st.info("👈 Introdu Cheia API în meniul din stânga și apasă pe **Activează Cheia**.")
 else:
-    with st.spinner("🔄 Se descarcă meciurile și datele istorice..."):
+    with st.spinner("🔄 Se descarcă meciurile și se construiesc modelele statistice..."):
         historical_matches, upcoming_matches = fetch_data_api_sports(st.session_state["api_key"], season_input)
 
     db, avg_home, avg_away = build_real_team_database(historical_matches)
@@ -307,12 +349,11 @@ else:
             for m in selected_matches:
                 l_h, l_a = calculate_expected_goals(m["home"], m["away"], db, avg_home, avg_away)
                 matrix = build_dixon_coles_matrix(l_h, l_a)
-                mkts = extract_all_markets(matrix)
+                mkts = extract_all_markets(matrix, l_h, l_a)
                 top_scores = get_top_correct_scores(matrix, top_n=5)
 
                 opt_market, opt_prob, opt_odds = get_best_value_pick(mkts, top_scores[0])
 
-                # Curățare obiect top_scores pentru afișare tabelară
                 clean_top_scores = []
                 for ts in top_scores:
                     clean_top_scores.append({
@@ -360,7 +401,7 @@ else:
                     st.metric("Încredere Medie", f"{avg_conf:.1f}%")
 
             st.markdown("---")
-            st.header("📊 Analiză Detaliată, Scor Corect & Piețe Extinse")
+            st.header("📊 Analiză Detaliată Extinsă")
 
             for item in analyzed_matches:
                 m = item["match"]
@@ -376,18 +417,18 @@ else:
                     c1, c2, c3, c4 = st.columns([1.2, 1.2, 1.2, 1.4])
                     
                     with c1:
-                        st.markdown("**1X2 & Combo**")
-                        items_c1 = [k for k in mkts.keys() if "Goluri" not in k and "Gazde" not in k and "Oaspeți" not in k]
+                        st.markdown("**1X2, DNB & Combouri**")
+                        items_c1 = [k for k in mkts.keys() if "Goluri" not in k and "Gazde" not in k and "Oaspeți" not in k and "Repriza" not in k]
                         st.dataframe(pd.DataFrame([{"Piață": k, "Prob.": f"{mkts[k]*100:.1f}%", "Cotă": f"{fair_odds(mkts[k]):.2f}"} for k in items_c1]), use_container_width=True)
                     
                     with c2:
-                        st.markdown("**Linii Goluri**")
-                        items_c2 = [k for k in mkts.keys() if "Goluri" in k]
+                        st.markdown("**Linii Total Goluri Meci**")
+                        items_c2 = [k for k in mkts.keys() if "Goluri" in k and "Gazde" not in k and "Oaspeți" not in k and "Repriza" not in k]
                         st.dataframe(pd.DataFrame([{"Piață": k, "Prob.": f"{mkts[k]*100:.1f}%", "Cotă": f"{fair_odds(mkts[k]):.2f}"} for k in items_c2]), use_container_width=True)
 
                     with c3:
-                        st.markdown("**Handicapuri**")
-                        items_c3 = [k for k in mkts.keys() if "Gazde" in k or "Oaspeți" in k]
+                        st.markdown("**Goluri Echipă & Reprize**")
+                        items_c3 = [k for k in mkts.keys() if "Gazde" in k or "Oaspeți" in k or "Repriza" in k]
                         st.dataframe(pd.DataFrame([{"Piață": k, "Prob.": f"{mkts[k]*100:.1f}%", "Cotă": f"{fair_odds(mkts[k]):.2f}"} for k in items_c3]), use_container_width=True)
 
                     with c4:
