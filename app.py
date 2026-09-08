@@ -21,15 +21,13 @@ MAX_GOALS = 10
 DECAY_DAYS = 180
 SHRINKAGE_GAMES = 8
 
+# ID UEFA Champions League = 2
 COMPETITIONS = {
-    39: "Premier League (Anglia)",
-    140: "La Liga (Spania)",
-    135: "Serie A (Italia)",
-    78: "Bundesliga (Germania)",
-    61: "Ligue 1 (Franța)",
-    283: "SuperLiga (România)",
     2: "UEFA Champions League",
-    3: "UEFA Europa League"
+    39: "Premier League",
+    140: "La Liga",
+    135: "Serie A",
+    78: "Bundesliga"
 }
 
 if "api_key" not in st.session_state:
@@ -63,10 +61,8 @@ def build_real_team_database(matches):
     home_goals, away_goals = [], []
 
     for m in matches:
-        sh = m.get("score_home")
-        sa = m.get("score_away")
-        home = m.get("home")
-        away = m.get("away")
+        sh, sa = m.get("score_home"), m.get("score_away")
+        home, away = m.get("home"), m.get("away")
 
         if sh is None or sa is None or not home or not away:
             continue
@@ -144,11 +140,11 @@ def extract_all_markets(matrix):
     return markets
 
 # ============================================================
-# 3. CONEXIUNE ȘI PRELUARE DATE API
+# 3. CONEXIUNE API-SPORTS (CU OBTINERE AUTOMATĂ SEZON & DIRECT AZI)
 # ============================================================
 
-@st.cache_data(ttl=900)
-def fetch_data_api_sports(api_key):
+@st.cache_data(ttl=300)
+def fetch_data_api_sports(api_key, season_year):
     if not api_key or len(api_key.strip()) < 8:
         return [], []
 
@@ -158,44 +154,46 @@ def fetch_data_api_sports(api_key):
     }
 
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    current_year = datetime.now(timezone.utc).year
-
     upcoming, historical = [], []
 
-    for league_id, comp_name in COMPETITIONS.items():
-        # Meciuri de Azi
-        try:
-            url_today = f"https://v3.football.api-sports.io/fixtures?date={today_str}&league={league_id}&season={current_year}"
-            res = requests.get(url_today, headers=headers, timeout=6)
-            if res.status_code == 200:
-                for item in res.json().get("response", []):
-                    upcoming.append({
-                        "id": item.get("fixture", {}).get("id"),
-                        "league": comp_name,
-                        "home": item.get("teams", {}).get("home", {}).get("name", "Gazde"),
-                        "away": item.get("teams", {}).get("away", {}).get("name", "Oaspeți"),
-                        "date": str(item.get("fixture", {}).get("date", today_str))[:10]
-                    })
-        except Exception:
-            pass
+    # Interogare DIRECTĂ pe data de AZI pentru TOATE meciurile din sistem (fără restricție de ligă inițială)
+    try:
+        url_today = f"https://v3.football.api-sports.io/fixtures?date={today_str}"
+        res = requests.get(url_today, headers=headers, timeout=8)
+        if res.status_code == 200:
+            data = res.json().get("response", [])
+            for item in data:
+                league_id = item.get("league", {}).get("id")
+                comp_name = item.get("league", {}).get("name", "Competiție")
+                
+                upcoming.append({
+                    "id": item.get("fixture", {}).get("id"),
+                    "league_id": league_id,
+                    "league": comp_name,
+                    "home": item.get("teams", {}).get("home", {}).get("name", "Gazde"),
+                    "away": item.get("teams", {}).get("away", {}).get("name", "Oaspeți"),
+                    "date": str(item.get("fixture", {}).get("date", today_str))[:10]
+                })
+    except Exception:
+        pass
 
-        # Istoric Recent
-        try:
-            url_hist = f"https://v3.football.api-sports.io/fixtures?league={league_id}&season={current_year}&last=25"
-            res_h = requests.get(url_hist, headers=headers, timeout=6)
-            if res_h.status_code == 200:
-                for item in res_h.json().get("response", []):
-                    status = item.get("fixture", {}).get("status", {}).get("short")
-                    if status in ["FT", "AET", "PEN"]:
-                        historical.append({
-                            "home": item.get("teams", {}).get("home", {}).get("name"),
-                            "away": item.get("teams", {}).get("away", {}).get("name"),
-                            "score_home": item.get("goals", {}).get("home"),
-                            "score_away": item.get("goals", {}).get("away"),
-                            "date": str(item.get("fixture", {}).get("date", ""))[:10]
-                        })
-        except Exception:
-            pass
+    # Extragere istoric recent pentru Champions League (League ID = 2)
+    try:
+        url_hist = f"https://v3.football.api-sports.io/fixtures?league=2&season={season_year}&last=30"
+        res_h = requests.get(url_hist, headers=headers, timeout=8)
+        if res_h.status_code == 200:
+            for item in res_h.json().get("response", []):
+                status = item.get("fixture", {}).get("status", {}).get("short")
+                if status in ["FT", "AET", "PEN"]:
+                    historical.append({
+                        "home": item.get("teams", {}).get("home", {}).get("name"),
+                        "away": item.get("teams", {}).get("away", {}).get("name"),
+                        "score_home": item.get("goals", {}).get("home"),
+                        "score_away": item.get("goals", {}).get("away"),
+                        "date": str(item.get("fixture", {}).get("date", ""))[:10]
+                    })
+    except Exception:
+        pass
 
     return historical, upcoming
 
@@ -203,77 +201,87 @@ def fetch_data_api_sports(api_key):
 # 4. INTERFAȚĂ UTILIZATOR
 # ============================================================
 
-st.title("⚡ Quantum Analytics Engine — Core Solution")
+st.title("⚡ Quantum Analytics Engine — UCL Special")
 
-input_key = st.sidebar.text_input("🔑 Introdu Cheia API (RapidAPI / API-Sports):", value=st.session_state["api_key"], type="password")
+input_key = st.sidebar.text_input("🔑 Cheie API (RapidAPI / API-Sports):", value=st.session_state["api_key"], type="password")
+season_input = st.sidebar.number_input("📅 Sezonul curent (Anul de start):", min_value=2023, max_value=2026, value=2026)
+
 if input_key:
     st.session_state["api_key"] = input_key
 
 if not st.session_state["api_key"]:
-    st.info("👈 Introdu Cheia API în bara din stânga pentru activarea motorului de analiză.")
+    st.info("👈 Introdu Cheia API în bara din stânga.")
 else:
-    with st.spinner("🔄 Conectare la serverele API-Football..."):
-        historical_matches, upcoming_matches = fetch_data_api_sports(st.session_state["api_key"])
+    with st.spinner("🔄 Se descarcă TOATE meciurile programate pentru AZI..."):
+        historical_matches, upcoming_matches = fetch_data_api_sports(st.session_state["api_key"], season_input)
 
     db, avg_home, avg_away = build_real_team_database(historical_matches)
-    st.sidebar.success(f"🧠 S-au încărcat {len(historical_matches)} meciuri în baza de date.")
-
+    
     if not upcoming_matches:
-        st.warning("⚠️ Nu există meciuri găsite astăzi pentru ligile configurate sau cheia API introdusă este invalidă.")
+        st.error("❌ Nu s-au primit date de la API. Verifică dacă Cheia API este activă sau dacă ai depășit limita de apeluri gratuite (Rate Limit).")
     else:
-        match_map = {f"[{m['league']}] {m['home']} vs {m['away']}": m for m in upcoming_matches}
-        selected_labels = st.sidebar.multiselect("Selectează Meciurile de Analizat:", options=list(match_map.keys()), default=list(match_map.keys()))
+        # Filtru opțional de competiții în sidebar
+        leagues_found = list(set([m["league"] for m in upcoming_matches]))
+        selected_league_filter = st.sidebar.multiselect("Filtrează după competiție:", options=leagues_found, default=[l for l in leagues_found if "Champions League" in l] or leagues_found)
 
-        selected_matches = [match_map[lbl] for lbl in selected_labels]
-        analyzed_matches, ticket_candidates = [], []
+        filtered_upcoming = [m for m in upcoming_matches if m["league"] in selected_league_filter]
 
-        for m in selected_matches:
-            l_h, l_a = calculate_expected_goals(m["home"], m["away"], db, avg_home, avg_away)
-            matrix = build_dixon_coles_matrix(l_h, l_a)
-            mkts = extract_all_markets(matrix)
+        if not filtered_upcoming:
+            st.warning("⚠️ Nu există meciuri pentru competiția selectată. Selectează altă competiție din bara laterală.")
+        else:
+            match_map = {f"[{m['league']}] {m['home']} vs {m['away']}": m for m in filtered_upcoming}
+            selected_labels = st.multiselect("Meciuri selectate pentru calculul cotelor fair:", options=list(match_map.keys()), default=list(match_map.keys()))
 
-            best_pick = max(mkts.items(), key=lambda x: x[1])
+            selected_matches = [match_map[lbl] for lbl in selected_labels]
+            analyzed_matches, ticket_candidates = [], []
 
-            analyzed_matches.append({"match": m, "l_h": l_h, "l_a": l_a, "markets": mkts})
-            ticket_candidates.append({
-                "Competiție": m["league"],
-                "Meci": f"{m['home']} vs {m['away']}",
-                "Pronostic Recommended": best_pick[0],
-                "Nivel Încredere": f"{best_pick[1]*100:.1f}%",
-                "Cotă Estimată": f"{fair_odds(best_pick[1]):.2f}",
-                "prob": best_pick[1],
-                "odds": fair_odds(best_pick[1])
-            })
+            for m in selected_matches:
+                l_h, l_a = calculate_expected_goals(m["home"], m["away"], db, avg_home, avg_away)
+                matrix = build_dixon_coles_matrix(l_h, l_a)
+                mkts = extract_all_markets(matrix)
 
-        # Section: Biletul Zilei
-        st.markdown("---")
-        st.header("🎟️ BILETUL ZILEI AUTOMAT")
+                best_pick = max(mkts.items(), key=lambda x: x[1])
 
-        if ticket_candidates:
-            top_picks = sorted(ticket_candidates, key=lambda x: x["prob"], reverse=True)[:4]
-            total_odds = float(np.prod([p["odds"] for p in top_picks]))
-            avg_conf = float(np.mean([p["prob"] for p in top_picks])) * 100
+                analyzed_matches.append({"match": m, "l_h": l_h, "l_a": l_a, "markets": mkts})
+                ticket_candidates.append({
+                    "Competiție": m["league"],
+                    "Meci": f"{m['home']} vs {m['away']}",
+                    "Pronostic Recommended": best_pick[0],
+                    "Nivel Încredere": f"{best_pick[1]*100:.1f}%",
+                    "Cotă Fair Estimată": f"{fair_odds(best_pick[1]):.2f}",
+                    "prob": best_pick[1],
+                    "odds": fair_odds(best_pick[1])
+                })
 
-            df_t = pd.DataFrame(top_picks).drop(columns=["prob", "odds"])
+            # Section: Biletul Zilei
+            st.markdown("---")
+            st.header("🎟️ BILETUL AUTOMAT UCL / AZI")
 
-            c1, c2 = st.columns([3, 1])
-            with c1:
-                st.dataframe(df_t, use_container_width=True)
-            with c2:
-                st.metric("Cotă Totală Bilet", f"{total_odds:.2f}")
-                st.metric("Încredere Calculată", f"{avg_conf:.1f}%")
+            if ticket_candidates:
+                top_picks = sorted(ticket_candidates, key=lambda x: x["prob"], reverse=True)[:4]
+                total_odds = float(np.prod([p["odds"] for p in top_picks]))
+                avg_conf = float(np.mean([p["prob"] for p in top_picks])) * 100
 
-        # Section: Detalii
-        st.markdown("---")
-        st.header("📊 Analiză Detaliată pe Meciuri")
+                df_t = pd.DataFrame(top_picks).drop(columns=["prob", "odds"])
 
-        for item in analyzed_matches:
-            m, l_h, l_a, mkts = item["match"], item["l_h"], item["l_a"], item["markets"]
-            with st.expander(f"⚽ [{m['league']}] {m['home']} vs {m['away']} | xG: {l_h:.2f} - {l_a:.2f}"):
-                c1, c2 = st.columns(2)
+                c1, c2 = st.columns([3, 1])
                 with c1:
-                    st.markdown("**1X2 & Șansă Dublă**")
-                    st.dataframe(pd.DataFrame([{"Piață": k, "Probabilitate": f"{v*100:.1f}%", "Cotă Fair": f"{fair_odds(v):.2f}"} for k, v in mkts.items() if "Goluri" not in k and "GG" not in k and "NG" not in k]), use_container_width=True)
+                    st.dataframe(df_t, use_container_width=True)
                 with c2:
-                    st.markdown("**Goluri & Ambele Marchează**")
-                    st.dataframe(pd.DataFrame([{"Piață": k, "Probabilitate": f"{v*100:.1f}%", "Cotă Fair": f"{fair_odds(v):.2f}"} for k, v in mkts.items() if "Goluri" in k or "GG" in k or "NG" in k]), use_container_width=True)
+                    st.metric("Cotă Totală Bilet", f"{total_odds:.2f}")
+                    st.metric("Încredere Medie", f"{avg_conf:.1f}%")
+
+            # Section: Detalii
+            st.markdown("---")
+            st.header("📊 Analiză Detaliată Meciuri")
+
+            for item in analyzed_matches:
+                m, l_h, l_a, mkts = item["match"], item["l_h"], item["l_a"], item["markets"]
+                with st.expander(f"⚽ [{m['league']}] {m['home']} vs {m['away']} | xG: {l_h:.2f} - {l_a:.2f}"):
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.markdown("**1X2 & Șansă Dublă**")
+                        st.dataframe(pd.DataFrame([{"Piață": k, "Probabilitate": f"{v*100:.1f}%", "Cotă Fair": f"{fair_odds(v):.2f}"} for k, v in mkts.items() if "Goluri" not in k and "GG" not in k and "NG" not in k]), use_container_width=True)
+                    with c2:
+                        st.markdown("**Goluri & Ambele Marchează**")
+                        st.dataframe(pd.DataFrame([{"Piață": k, "Probabilitate": f"{v*100:.1f}%", "Cotă Fair": f"{fair_odds(v):.2f}"} for k, v in mkts.items() if "Goluri" in k or "GG" in k or "NG" in k]), use_container_width=True)
