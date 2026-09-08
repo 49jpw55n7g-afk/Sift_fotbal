@@ -5,7 +5,7 @@ import pandas as pd
 import streamlit as st
 
 from scipy.stats import poisson
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 # ============================================================
 # 1. CONFIGURARE PAGINĂ STREAMLIT
@@ -25,11 +25,21 @@ DEFAULT_RHO = -0.10
 MIN_EDGE = 0.04
 MIN_EV = 0.05
 
-# Lista codurilor de competiție disponibile în planul gratuit football-data.org
-FREE_COMPETITIONS = ["CL", "PL", "PD", "SA", "BL1", "FL1", "PPD", "DED"]
+# Competițiile disponibile în planul gratuit football-data.org
+FREE_COMPETITIONS = {
+    "CL": "UEFA Champions League",
+    "PL": "Premier League",
+    "PD": "La Liga",
+    "SA": "Serie A",
+    "BL1": "Bundesliga",
+    "FL1": "Ligue 1",
+    "PPD": "Primeira Liga",
+    "DED": "Eredivisie",
+    "CLI": "Copa Libertadores"
+}
 
 # ============================================================
-# 2. UTILS & MATEMATICĂ (LOGICA TA INTACTĂ)
+# 2. UTILS & MATEMATICĂ (DIXON-COLES V4 INTACT)
 # ============================================================
 
 def clamp(x, low, high):
@@ -52,7 +62,7 @@ def calculate_ev(prob, odds):
     return (prob * (odds - 1.0)) - (1.0 - prob)
 
 # ============================================================
-# 3. ENGINE DIXON-COLES V4 (LOGICA TA INTACTĂ)
+# 3. ENGINE DIXON-COLES V4
 # ============================================================
 
 def get_temporal_weight(match_date, ref_date=None):
@@ -219,108 +229,95 @@ def extract_markets_from_matrix(matrix):
     return markets
 
 # ============================================================
-# 4. PRELUARE AUTOMATĂ DIN API FOOTBALL-DATA.ORG
+# 4. PARSURARE INTERACTIVĂ A TOATE COMPETIȚIILE GRATUITE
 # ============================================================
 
-@st.cache_data(ttl=43200)  # Reîmprospătare la 12 ore (în fiecare dimineață)
-def fetch_api_matches(api_key):
+@st.cache_data(ttl=3600)
+def fetch_all_free_matches(api_key):
     if not api_key or len(api_key.strip()) < 10:
         return [], []
 
     headers = {'X-Auth-Token': api_key.strip()}
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    
+    today_dt = datetime.now(timezone.utc)
+    today_str = today_dt.strftime("%Y-%m-%d")
+    next_3_days_str = (today_dt + timedelta(days=3)).strftime("%Y-%m-%d")
+
     upcoming = []
     historical = []
 
-    # Interogare endpoint principal pentru meciurile de azi
-    url = f"https://api.football-data.org/v4/matches?dateFrom={today_str}&dateTo={today_str}"
-    
-    try:
-        res = requests.get(url, headers=headers, timeout=10)
-        
-        # Daca endpoint-ul global e blocat, parcurgem ligile gratuite permise
-        if res.status_code in (400, 403):
-            raw_matches = []
-            for comp in FREE_COMPETITIONS:
-                c_url = f"https://api.football-data.org/v4/competitions/{comp}/matches?dateFrom={today_str}&dateTo={today_str}"
-                r = requests.get(c_url, headers=headers, timeout=5)
-                if r.status_code == 200:
-                    raw_matches.extend(r.json().get("matches", []))
-        elif res.status_code == 200:
-            raw_matches = res.json().get("matches", [])
-        else:
-            st.error(f"Eroare API: Cod HTTP {res.status_code}")
-            return [], []
+    # Iterăm prin fiecare competiție din planul gratuit
+    for code, comp_name in FREE_COMPETITIONS.items():
+        url = f"https://api.football-data.org/v4/competitions/{code}/matches?dateFrom={today_str}&dateTo={next_3_days_str}"
+        try:
+            res = requests.get(url, headers=headers, timeout=6)
+            if res.status_code == 200:
+                raw_matches = res.json().get("matches", [])
+                for m in raw_matches:
+                    status = m.get("status")
+                    if status in ("SCHEDULED", "TIMED"):
+                        odds_data = m.get("odds", {})
+                        upcoming.append({
+                            "id": m.get("id"),
+                            "league": comp_name,
+                            "home": m.get("homeTeam", {}).get("name", "Gazde"),
+                            "away": m.get("awayTeam", {}).get("name", "Oaspeți"),
+                            "date": m.get("utcDate", today_str)[:10],
+                            "odds": {
+                                "1": float(odds_data.get("homeWin", 2.10)),
+                                "X": float(odds_data.get("draw", 3.30)),
+                                "2": float(odds_data.get("awayWin", 3.50)),
+                                "OVER_2.5": 1.90
+                            }
+                        })
+                    elif status == "FINISHED":
+                        score = m.get("score", {}).get("fullTime", {})
+                        historical.append({
+                            "home": m.get("homeTeam", {}).get("name"),
+                            "away": m.get("awayTeam", {}).get("name"),
+                            "score_home": score.get("home"),
+                            "score_away": score.get("away"),
+                            "completed": True,
+                            "date": m.get("utcDate")[:10]
+                        })
+        except Exception:
+            continue
 
-        for m in raw_matches:
-            # Preluare cote furnizate de API dacă există, altfel cote implicite
-            odds_data = m.get("odds", {})
-            h_odds = odds_data.get("homeWin", 2.10)
-            d_odds = odds_data.get("draw", 3.30)
-            a_odds = odds_data.get("awayWin", 3.50)
-
-            upcoming.append({
-                "id": m.get("id"),
-                "league": m.get("competition", {}).get("name", "Fotbal"),
-                "home": m.get("homeTeam", {}).get("name", "Gazde"),
-                "away": m.get("awayTeam", {}).get("name", "Oaspeți"),
-                "date": m.get("utcDate", today_str)[:10],
-                "odds": {"1": float(h_odds), "X": float(d_odds), "2": float(a_odds), "OVER_2.5": 1.90}
-            })
-
-            # Extragere meciuri finalizate (dacă există în răspuns) pentru baza de date
-            if m.get("status") == "FINISHED":
-                score = m.get("score", {}).get("fullTime", {})
-                historical.append({
-                    "home": m.get("homeTeam", {}).get("name"),
-                    "away": m.get("awayTeam", {}).get("name"),
-                    "score_home": score.get("home"),
-                    "score_away": score.get("away"),
-                    "completed": True,
-                    "date": m.get("utcDate")[:10]
-                })
-
-        return historical, upcoming
-
-    except Exception as e:
-        st.error(f"Eroare la conectarea cu API-ul: {e}")
-        return [], []
+    return historical, upcoming
 
 # ============================================================
 # 5. INTERFAȚĂ STREAMLIT (UI)
 # ============================================================
 
 st.title("⚽ Quantitative Football Analytics Engine V4")
-st.caption("Auto Value Bet Identification Engine | Conectat Live la API")
+st.caption("Auto Value Bet Identification Engine | Sincronizare Multi-Competițională")
 
 api_key = st.sidebar.text_input("Cheie API Football-Data.org", type="password")
 
 if not api_key:
-    st.info("👈 Introdu cheia API în bara laterală din stânga pentru a încărca automat meciurile de azi.")
+    st.info("👈 Introdu cheia API în bara laterală din stânga pentru a încărca meciurile.")
 else:
-    historical_matches, upcoming_matches = fetch_api_matches(api_key)
+    historical_matches, upcoming_matches = fetch_all_free_matches(api_key)
     db, avg_home, avg_away = build_real_team_database(historical_matches)
 
     if not upcoming_matches:
-        st.warning("Nu au fost găsite meciuri programate pentru astăzi în ligile din contul tău API.")
+        st.warning("⚠️ Nu s-au găsit meciuri viitoare programate în următoarele 3 zile pentru competițiile gratuite (UEFA Champions League, Premier League, La Liga, Serie A, etc.). Verifică dacă cheia API este activă.")
     else:
-        st.sidebar.header("🎯 Filtru Meciuri")
+        st.sidebar.header("🎯 Filtru Meciuri & Ligi")
 
         # Selecție pe Ligi
         leagues = sorted(list(set(m["league"] for m in upcoming_matches)))
-        selected_leagues = st.sidebar.multiselect("Competiții:", options=leagues, default=leagues)
+        selected_leagues = st.sidebar.multiselect("Competiții Active:", options=leagues, default=leagues)
 
         filtered = [m for m in upcoming_matches if m["league"] in selected_leagues]
 
         # Selecție meciuri individuale
-        match_map = {f"{m['league']} | {m['home']} vs {m['away']}": m['id'] for m in filtered}
+        match_map = {f"{m['league']} | {m['home']} vs {m['away']} ({m['date']})": m['id'] for m in filtered}
         selected_labels = st.sidebar.multiselect("Alege meciurile de analizat:", options=list(match_map.keys()), default=list(match_map.keys()))
 
         selected_ids = [match_map[lbl] for lbl in selected_labels if lbl in match_map]
         matches_to_analyze = [m for m in filtered if m['id'] in selected_ids]
 
-        st.subheader(f"📅 Meciuri Azi în Analiză ({len(matches_to_analyze)})")
+        st.subheader(f"📅 Meciuri în Analiză ({len(matches_to_analyze)})")
         
         total_value_bets = 0
 
