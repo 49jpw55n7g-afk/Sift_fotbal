@@ -12,7 +12,7 @@ from datetime import datetime, timezone, timedelta
 # ============================================================
 
 st.set_page_config(
-    page_title="Quantum Analytics Engine - Year 3000 Edition",
+    page_title="Quantum Analytics Engine — Year 3000 Edition",
     page_icon="⚡",
     layout="wide"
 )
@@ -20,32 +20,31 @@ st.set_page_config(
 MAX_GOALS = 10
 DECAY_DAYS = 180
 SHRINKAGE_GAMES = 8
-DEFAULT_RHO = -0.10
 
+# ID-uri oficiale API-Football (v3.football.api-sports.io)
 COMPETITIONS = {
-    "PL": "Premier League (Anglia)",
-    "PD": "La Liga (Spania)",
-    "SA": "Serie A (Italia)",
-    "BL1": "Bundesliga (Germania)",
-    "FL1": "Ligue 1 (Franța)",
-    "RO1": "SuperLiga (România)",
-    "CL": "UEFA Champions League",
-    "EL": "UEFA Europa League",
-    "ECL": "UEFA Conference League",
-    "FAC": "FA Cup",
-    "CDR": "Copa del Rey",
-    "DFB": "DFB-Pokal",
-    "CI": "Coppa Italia",
-    "CDF": "Coupe de France",
-    "CR": "Cupa României"
+    39: "Premier League (Anglia)",
+    140: "La Liga (Spania)",
+    135: "Serie A (Italia)",
+    78: "Bundesliga (Germania)",
+    61: "Ligue 1 (Franța)",
+    283: "SuperLiga (România)",
+    2: "UEFA Champions League",
+    3: "UEFA Europa League",
+    848: "UEFA Conference League",
+    45: "FA Cup",
+    143: "Copa del Rey",
+    81: "DFB-Pokal",
+    137: "Coppa Italia",
+    66: "Coupe de France",
+    513: "Cupa României"
 }
 
-# Persistent API Key State
 if "api_key" not in st.session_state:
     st.session_state["api_key"] = ""
 
 # ============================================================
-# 2. UTILS & MATHEMATICS ENGINE
+# 2. ENGINE MATEMATIC & DIXON-COLES
 # ============================================================
 
 def clamp(x, low, high):
@@ -77,9 +76,6 @@ def build_real_team_database(matches):
     home_goals, away_goals = [], []
 
     for m in matches:
-        if not m.get("completed"):
-            continue
-
         sh, sa = m.get("score_home"), m.get("score_away")
         home, away = m.get("home"), m.get("away")
 
@@ -104,7 +100,7 @@ def build_real_team_database(matches):
 def calculate_team_strength(team, venue, database, league_avg):
     matches = [m for m in database.get(team, []) if m["venue"] == venue]
     if not matches:
-        return {"attack": 1.0, "defense": 1.0, "games": 0}
+        return {"attack": 1.0, "defense": 1.0}
 
     gf = np.array([m["goals_for"] for m in matches])
     ga = np.array([m["goals_against"] for m in matches])
@@ -120,35 +116,7 @@ def calculate_team_strength(team, venue, database, league_avg):
     adj_gf = (shrink * avg_gf) + ((1.0 - shrink) * league_avg)
     adj_ga = (shrink * avg_ga) + ((1.0 - shrink) * league_avg)
 
-    return {"attack": float(adj_gf / league_avg), "defense": float(adj_ga / league_avg), "games": games}
-
-def calculate_recent_form(team, database, last_n=5):
-    matches = database.get(team, [])
-    if not matches:
-        return 1.0
-
-    sorted_m = sorted(matches, key=lambda x: x["weight"], reverse=True)[:last_n]
-    points = [3 if m["goals_for"] > m["goals_against"] else (1 if m["goals_for"] == m["goals_against"] else 0) for m in sorted_m]
-    avg_p = np.mean(points) if points else 1.36
-    return float(0.80 + (avg_p / 3.0) * 0.40)
-
-def dixon_coles_tau(h, a, l_home, l_away, rho):
-    if h == 0 and a == 0: return 1.0 - (l_home * l_away * rho)
-    elif h == 0 and a == 1: return 1.0 + (l_home * rho)
-    elif h == 1 and a == 0: return 1.0 + (l_away * rho)
-    elif h == 1 and a == 1: return 1.0 - rho
-    return 1.0
-
-def build_dixon_coles_matrix(l_home, l_away, rho=DEFAULT_RHO, max_goals=MAX_GOALS):
-    matrix = np.zeros((max_goals + 1, max_goals + 1))
-    for h in range(max_goals + 1):
-        for a in range(max_goals + 1):
-            base_p = poisson.pmf(h, l_home) * poisson.pmf(a, l_away)
-            tau = dixon_coles_tau(h, a, l_home, l_away, rho)
-            matrix[h, a] = base_p * tau
-
-    total = np.sum(matrix)
-    return matrix / total if total > 0 else matrix
+    return {"attack": float(adj_gf / league_avg), "defense": float(adj_ga / league_avg)}
 
 def calculate_expected_goals(home_team, away_team, database, avg_home, avg_away):
     h_str = calculate_team_strength(home_team, "home", database, avg_home)
@@ -157,23 +125,28 @@ def calculate_expected_goals(home_team, away_team, database, avg_home, avg_away)
     l_home = avg_home * h_str["attack"] * a_str["defense"]
     l_away = avg_away * a_str["attack"] * h_str["defense"]
 
-    l_home *= (0.85 + 0.15 * calculate_recent_form(home_team, database))
-    l_away *= (0.85 + 0.15 * calculate_recent_form(away_team, database))
-
     return clamp(l_home, 0.2, 4.5), clamp(l_away, 0.2, 4.5)
+
+def build_dixon_coles_matrix(l_home, l_away, max_goals=MAX_GOALS):
+    matrix = np.zeros((max_goals + 1, max_goals + 1))
+    for h in range(max_goals + 1):
+        for a in range(max_goals + 1):
+            matrix[h, a] = poisson.pmf(h, l_home) * poisson.pmf(a, l_away)
+
+    total = np.sum(matrix)
+    return matrix / total if total > 0 else matrix
 
 def extract_all_markets(matrix):
     size = matrix.shape[0]
     p_1 = float(np.sum(np.tril(matrix, -1)))
     p_x = float(np.sum(np.diag(matrix)))
     p_2 = float(np.sum(np.triu(matrix, 1)))
+    p_btts = float(np.sum(matrix[1:, 1:]))
 
-    p_btts_yes = float(np.sum(matrix[1:, 1:]))
-    
     markets = {
         "1 (Gazde)": p_1, "X (Egal)": p_x, "2 (Oaspeți)": p_2,
         "1X (Șansă Dublă)": p_1 + p_x, "X2 (Șansă Dublă)": p_x + p_2, "12 (Fără Egal)": p_1 + p_2,
-        "GG (Ambele Marchează)": p_btts_yes, "NG (Nu Marchează Ambele)": 1.0 - p_btts_yes
+        "GG (Ambele Marchează)": p_btts, "NG (Nu Marchează Ambele)": 1.0 - p_btts
     }
 
     for line in [1.5, 2.5, 3.5]:
@@ -181,44 +154,39 @@ def extract_all_markets(matrix):
         markets[f"Peste {line} Goluri"] = float(over_p)
         markets[f"Sub {line} Goluri"] = float(1.0 - over_p)
 
-    markets["1X & Peste 1.5"] = float(sum(matrix[h, a] for h in range(size) for a in range(size) if h >= a and (h + a) > 1.5))
-    markets["X2 & Peste 1.5"] = float(sum(matrix[h, a] for h in range(size) for a in range(size) if a >= h and (h + a) > 1.5))
-
     return markets
 
 # ============================================================
-# 3. AUTO SYNC API ENGINE
+# 3. SINCRONIZARE API-FOOTBALL V3 (API-SPORTS)
 # ============================================================
 
 @st.cache_data(ttl=900)
-def fetch_all_matches_auto_rapidapi(api_key):
+def fetch_data_api_sports(api_key):
     if not api_key or len(api_key.strip()) < 8:
         return [], []
 
-    # Se folosește cheia obținută gratuit de pe RapidAPI (API-Football)
     headers = {
         "x-rapidapi-key": api_key.strip(),
         "x-rapidapi-host": "v3.football.api-sports.io"
     }
 
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    
-    # ID-urile oficiale pentru API-Football: 
-    # 39=Premier League, 140=La Liga, 135=Serie A, 78=Bundesliga, 61=Ligue 1, 283=SuperLiga RO
-    leagues_ids = [39, 140, 135, 78, 61, 283, 2, 3] 
+    today_dt = datetime.now(timezone.utc)
+    today_str = today_dt.strftime("%Y-%m-%d")
+    current_year = today_dt.year
 
     upcoming = []
-    
-    for league_id in leagues_ids:
-        url = f"https://v3.football.api-sports.io/fixtures?date={today_str}&league={league_id}&season=2024"
+    historical = []
+
+    for league_id, comp_name in COMPETITIONS.items():
+        # 1. Fetch meciuri de azi
+        url_today = f"https://v3.football.api-sports.io/fixtures?date={today_str}&league={league_id}&season={current_year}"
         try:
-            res = requests.get(url, headers=headers, timeout=5)
+            res = requests.get(url_today, headers=headers, timeout=5)
             if res.status_code == 200:
-                data = res.json().get("response", [])
-                for item in data:
+                for item in res.json().get("response", []):
                     upcoming.append({
                         "id": item["fixture"]["id"],
-                        "league": item["league"]["name"],
+                        "league": comp_name,
                         "home": item["teams"]["home"]["name"],
                         "away": item["teams"]["away"]["name"],
                         "date": item["fixture"]["date"][:10],
@@ -227,161 +195,100 @@ def fetch_all_matches_auto_rapidapi(api_key):
         except Exception:
             pass
 
-    return [], upcoming
-
-
-    for code, comp_name in COMPETITIONS.items():
-        # Fetch today matches
-        url_up = f"https://api.football-data.org/v4/competitions/{code}/matches?dateFrom={today_str}&dateTo={today_str}"
+        # 2. Fetch ultimele meciuri terminate (pentru învățare)
+        url_hist = f"https://v3.football.api-sports.io/fixtures?league={league_id}&season={current_year}&last=30"
         try:
-            res = requests.get(url_up, headers=headers, timeout=4)
-            if res.status_code == 200:
-                for m in res.json().get("matches", []):
-                    upcoming.append({
-                        "id": m.get("id"),
-                        "league": comp_name,
-                        "home": m.get("homeTeam", {}).get("name", "Gazde"),
-                        "away": m.get("awayTeam", {}).get("name", "Oaspeți"),
-                        "date": m.get("utcDate", today_str)[:10],
-                        "status": m.get("status")
-                    })
-        except Exception:
-            pass
-
-        # Fetch historical data for machine learning
-        url_hist = f"https://api.football-data.org/v4/competitions/{code}/matches?dateFrom={past_60_str}&dateTo={today_str}"
-        try:
-            res_h = requests.get(url_hist, headers=headers, timeout=4)
+            res_h = requests.get(url_hist, headers=headers, timeout=5)
             if res_h.status_code == 200:
-                for m in res_h.json().get("matches", []):
-                    if m.get("status") == "FINISHED":
-                        sc = m.get("score", {}).get("fullTime", {})
-                        if sc.get("home") is not None and sc.get("away") is not None:
-                            historical.append({
-                                "home": m.get("homeTeam", {}).get("name"),
-                                "away": m.get("awayTeam", {}).get("name"),
-                                "score_home": sc.get("home"),
-                                "score_away": sc.get("away"),
-                                "completed": True,
-                                "date": m.get("utcDate")[:10]
-                            })
+                for item in res_h.json().get("response", []):
+                    if item["fixture"]["status"]["short"] in ["FT", "AET", "PEN"]:
+                        historical.append({
+                            "home": item["teams"]["home"]["name"],
+                            "away": item["teams"]["away"]["name"],
+                            "score_home": item["goals"]["home"],
+                            "score_away": item["goals"]["away"],
+                            "date": item["fixture"]["date"][:10]
+                        })
         except Exception:
             pass
 
     return historical, upcoming
 
 # ============================================================
-# 4. INTERFAȚĂ UTILIZATOR STREAMLIT
+# 4. INTERFAȚĂ APLICAȚIE
 # ============================================================
 
 st.title("⚡ Quantum Analytics Engine — Year 3000 Edition")
 st.caption("🤖 Predictor Autonom & Generator Biletul Zilei cu Auto-Învățare")
 
-input_key = st.sidebar.text_input("🔑 Cheie API Football-Data.org:", value=st.session_state["api_key"], type="password")
-
+input_key = st.sidebar.text_input("🔑 Cheie API-Sports / RapidAPI:", value=st.session_state["api_key"], type="password")
 if input_key:
     st.session_state["api_key"] = input_key
 
 if not st.session_state["api_key"]:
-    st.info("👈 Introduceți Cheia API în bara laterală. Cheia va fi salvată automat pentru întreaga sesiune.")
+    st.info("👈 Introdu cheia ta RapidAPI / API-Sports în bara laterală.")
 else:
-    with st.spinner("🔄 Se sincronizează meciurile de AZI și se actualizează modelul matematic..."):
-        historical_matches, upcoming_matches = fetch_all_matches_auto(st.session_state["api_key"])
+    with st.spinner("🔄 Se descarcă datele din API-Football v3..."):
+        historical_matches, upcoming_matches = fetch_data_api_sports(st.session_state["api_key"])
 
     db, avg_home, avg_away = build_real_team_database(historical_matches)
-    st.sidebar.success(f"🧠 Bază de date actualizată: {len(historical_matches)} meciuri învățate!")
+    st.sidebar.success(f"🧠 {len(historical_matches)} meciuri analizate din sistem!")
 
     if not upcoming_matches:
-        st.warning("⚠️ Nu există meciuri programate pentru AZI în ligile selectate sau abonamentul API nu include ligile respective.")
+        st.warning("⚠️ Nu sunt meciuri azi în ligile selectate sau cheia API este invalidă / fără credit.")
     else:
-        st.sidebar.header("🎯 Meciuri de Azi")
-        
         match_map = {f"[{m['league']}] {m['home']} vs {m['away']}": m for m in upcoming_matches}
-        selected_labels = st.sidebar.multiselect(
-            "Alege meciurile de analizat:",
-            options=list(match_map.keys()),
-            default=list(match_map.keys())
-        )
+        selected_labels = st.sidebar.multiselect("Selectează meciuri de analizat:", options=list(match_map.keys()), default=list(match_map.keys()))
 
         selected_matches = [match_map[lbl] for lbl in selected_labels]
-
-        analyzed_matches = []
-        ticket_candidates = []
+        analyzed_matches, ticket_candidates = [], []
 
         for m in selected_matches:
             l_h, l_a = calculate_expected_goals(m["home"], m["away"], db, avg_home, avg_away)
             matrix = build_dixon_coles_matrix(l_h, l_a)
             mkts = extract_all_markets(matrix)
 
-            # Găsește cea mai sigură opțiune pentru bilet
             best_pick = max(mkts.items(), key=lambda x: x[1])
-            
-            analyzed_matches.append({
-                "match": m, "l_h": l_h, "l_a": l_a, "markets": mkts
-            })
 
+            analyzed_matches.append({"match": m, "l_h": l_h, "l_a": l_a, "markets": mkts})
             ticket_candidates.append({
                 "Competiție": m["league"],
                 "Meci": f"{m['home']} vs {m['away']}",
-                "Pronostic Optim": best_pick[0],
-                "Nivel Încredere": f"{best_pick[1] * 100:.1f}%",
-                "Cotă Estimată (Fair)": f"{fair_odds(best_pick[1]):.2f}",
-                "raw_prob": best_pick[1],
-                "raw_odds": fair_odds(best_pick[1])
+                "Pronostic": best_pick[0],
+                "Încredere": f"{best_pick[1]*100:.1f}%",
+                "Cotă Fair": f"{fair_odds(best_pick[1]):.2f}",
+                "prob": best_pick[1], "odds": fair_odds(best_pick[1])
             })
 
-        # ============================================================
-        # GENERARE AUTOMATĂ BILETUL ZILEI
-        # ============================================================
+        # Biletul Zilei Automat
         st.markdown("---")
         st.header("🎟️ BILETUL ZILEI AUTOMAT (Șansă Maximă de Reușită)")
 
         if ticket_candidates:
-            # Sortăm după probabilitate și alegem top 3-4 cele mai sigure
-            best_ticket_picks = sorted(ticket_candidates, key=lambda x: x["raw_prob"], reverse=True)[:4]
-            
-            total_odds = 1.0
-            avg_conf = np.mean([p["raw_prob"] for p in best_ticket_picks]) * 100
+            top_picks = sorted(ticket_candidates, key=lambda x: x["prob"], reverse=True)[:4]
+            total_odds = float(np.prod([p["odds"] for p in top_picks]))
+            avg_conf = float(np.mean([p["prob"] for p in top_picks])) * 100
 
-            for p in best_ticket_picks:
-                total_odds *= p["raw_odds"]
+            df_t = pd.DataFrame(top_picks).drop(columns=["prob", "odds"])
 
-            df_ticket = pd.DataFrame(best_ticket_picks).drop(columns=["raw_prob", "raw_odds"])
-            
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                st.dataframe(df_ticket, use_container_width=True)
-            with col2:
+            c1, c2 = st.columns([3, 1])
+            with c1:
+                st.dataframe(df_t, use_container_width=True)
+            with c2:
                 st.metric("Cotă Totală Bilet", f"{total_odds:.2f}")
-                st.metric("Încredere Algoritm", f"{avg_conf:.1f}%")
-                st.caption("Pariurile sunt generate automat pe baza calculelor de densitate de probabilitate Dixon-Coles.")
+                st.metric("Nivel Încredere", f"{avg_conf:.1f}%")
 
-        # ============================================================
-        # ANALIZĂ DETALIATĂ MECI CU MECI
-        # ============================================================
+        # Analiza meciurilor
         st.markdown("---")
-        st.header(f"📊 Analiză Detaliată & Toată Gama de Pariuri ({len(analyzed_matches)})")
+        st.header("📊 Analiză Detaliată Meciuri")
 
         for item in analyzed_matches:
-            m = item["match"]
-            l_h, l_a = item["l_h"], item["l_a"]
-            mkts = item["markets"]
-
+            m, l_h, l_a, mkts = item["match"], item["l_h"], item["l_a"], item["markets"]
             with st.expander(f"⚽ [{m['league']}] {m['home']} vs {m['away']} | xG: {l_h:.2f} - {l_a:.2f}"):
                 c1, c2 = st.columns(2)
-
                 with c1:
-                    st.markdown("**🏆 Rezultat Final & Șansă Dublă**")
-                    data_res = [
-                        {"Piață": k, "Probabilitate": f"{v*100:.1f}%", "Cotă Fair": f"{fair_odds(v):.2f}"}
-                        for k, v in mkts.items() if k in ["1 (Gazde)", "X (Egal)", "2 (Oaspeți)", "1X (Șansă Dublă)", "X2 (Șansă Dublă)", "12 (Fără Egal)"]
-                    ]
-                    st.dataframe(pd.DataFrame(data_res), use_container_width=True)
-
+                    st.markdown("**1X2 & Șansă Dublă**")
+                    st.dataframe(pd.DataFrame([{"Piață": k, "Probabilitate": f"{v*100:.1f}%", "Cotă Fair": f"{fair_odds(v):.2f}"} for k, v in mkts.items() if "Goluri" not in k and "GG" not in k and "NG" not in k]), use_container_width=True)
                 with c2:
-                    st.markdown("**⚽ Goluri & Combo**")
-                    data_goals = [
-                        {"Piață": k, "Probabilitate": f"{v*100:.1f}%", "Cotă Fair": f"{fair_odds(v):.2f}"}
-                        for k, v in mkts.items() if k not in ["1 (Gazde)", "X (Egal)", "2 (Oaspeți)", "1X (Șansă Dublă)", "X2 (Șansă Dublă)", "12 (Fără Egal)"]
-                    ]
-                    st.dataframe(pd.DataFrame(data_goals), use_container_width=True)
+                    st.markdown("**Goluri & Ambele Marchează**")
+                    st.dataframe(pd.DataFrame([{"Piață": k, "Probabilitate": f"{v*100:.1f}%", "Cotă Fair": f"{fair_odds(v):.2f}"} for k, v in mkts.items() if "Goluri" in k or "GG" in k or "NG" in k]), use_container_width=True)
