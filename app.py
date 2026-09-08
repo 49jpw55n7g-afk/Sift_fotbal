@@ -191,17 +191,44 @@ def extract_all_markets(matrix):
 # ============================================================
 
 @st.cache_data(ttl=900)
-def fetch_all_matches_auto(api_key):
+def fetch_all_matches_auto_rapidapi(api_key):
     if not api_key or len(api_key.strip()) < 8:
         return [], []
 
-    headers = {'X-Auth-Token': api_key.strip()}
-    today_dt = datetime.now(timezone.utc)
-    today_str = today_dt.strftime("%Y-%m-%d")
-    past_60_str = (today_dt - timedelta(days=60)).strftime("%Y-%m-%d")
+    # Se folosește cheia obținută gratuit de pe RapidAPI (API-Football)
+    headers = {
+        "x-rapidapi-key": api_key.strip(),
+        "x-rapidapi-host": "v3.football.api-sports.io"
+    }
+
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    
+    # ID-urile oficiale pentru API-Football: 
+    # 39=Premier League, 140=La Liga, 135=Serie A, 78=Bundesliga, 61=Ligue 1, 283=SuperLiga RO
+    leagues_ids = [39, 140, 135, 78, 61, 283, 2, 3] 
 
     upcoming = []
-    historical = []
+    
+    for league_id in leagues_ids:
+        url = f"https://v3.football.api-sports.io/fixtures?date={today_str}&league={league_id}&season=2024"
+        try:
+            res = requests.get(url, headers=headers, timeout=5)
+            if res.status_code == 200:
+                data = res.json().get("response", [])
+                for item in data:
+                    upcoming.append({
+                        "id": item["fixture"]["id"],
+                        "league": item["league"]["name"],
+                        "home": item["teams"]["home"]["name"],
+                        "away": item["teams"]["away"]["name"],
+                        "date": item["fixture"]["date"][:10],
+                        "status": item["fixture"]["status"]["short"]
+                    })
+        except Exception:
+            pass
+
+    return [], upcoming
+
 
     for code, comp_name in COMPETITIONS.items():
         # Fetch today matches
