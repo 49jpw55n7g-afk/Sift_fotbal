@@ -1,3 +1,4 @@
+import os
 import math
 import requests
 import numpy as np
@@ -8,7 +9,7 @@ from scipy.stats import poisson
 from datetime import datetime, timezone
 
 # ============================================================
-# 1. CONFIGURARE PAGINĂ & GESTIONARE CHEIE API
+# 1. CONFIGURARE PAGINĂ & PERSISTENȚĂ AUTO-SAVE CHEIE API
 # ============================================================
 
 st.set_page_config(
@@ -17,15 +18,32 @@ st.set_page_config(
     layout="wide"
 )
 
-saved_key = ""
-try:
-    if "API_KEY" in st.secrets:
-        saved_key = st.secrets["API_KEY"]
-except Exception:
-    pass
+# Salvare & Încărcare automată din fișier local
+KEY_FILE = "api_key.txt"
+
+def load_saved_key():
+    if os.path.exists(KEY_FILE):
+        try:
+            with open(KEY_FILE, "r") as f:
+                return f.read().strip()
+        except Exception:
+            pass
+    try:
+        if "API_KEY" in st.secrets:
+            return st.secrets["API_KEY"]
+    except Exception:
+        pass
+    return ""
+
+def save_key_to_file(key):
+    try:
+        with open(KEY_FILE, "w") as f:
+            f.write(key.strip())
+    except Exception:
+        pass
 
 if "api_key" not in st.session_state:
-    st.session_state["api_key"] = saved_key
+    st.session_state["api_key"] = load_saved_key()
 
 MAX_GOALS = 10
 DECAY_DAYS = 180
@@ -196,9 +214,6 @@ def get_top_correct_scores(matrix, top_n=5):
     return scores
 
 def get_best_value_pick(markets, top_score):
-    """
-    Selectează varianta optimală eliminând complet contradicțiile cu scorul principal.
-    """
     h_g = top_score["h_goals"]
     a_g = top_score["a_goals"]
     total_goals = h_g + a_g
@@ -213,7 +228,6 @@ def get_best_value_pick(markets, top_score):
     for market, prob in markets.items():
         odds = fair_odds(prob)
 
-        # Incompatibilități Solist vs Scor Corect
         if is_home_win and market in ["2 (Oaspeți)", "X2 (Șansă Dublă)", "X (Egal)", "2 & GG"]:
             continue
         if is_away_win and market in ["1 (Gazde)", "1X (Șansă Dublă)", "X (Egal)", "1 & GG"]:
@@ -221,7 +235,6 @@ def get_best_value_pick(markets, top_score):
         if is_draw and market in ["1 (Gazde)", "2 (Oaspeți)", "1 & GG", "2 & GG"]:
             continue
 
-        # Incompatibilități Goluri vs Total Scor
         if total_goals <= 2 and "Peste 3.5" in market:
             continue
         if total_goals <= 1 and "Peste 2.5" in market:
@@ -231,7 +244,6 @@ def get_best_value_pick(markets, top_score):
         if total_goals >= 4 and "Sub 2.5" in market:
             continue
 
-        # Incompatibilități GG / NG
         if both_scored and "NG" in market:
             continue
         if not both_scored and market in ["GG (Ambele Marchează)", "1 & GG", "2 & GG"]:
@@ -287,7 +299,6 @@ def fetch_data_api_sports(api_key, season_year):
             for item in data:
                 league_id = item.get("league", {}).get("id")
                 
-                # Filtrăm doar ligile prestabilite
                 if league_id in ALLOWED_LEAGUES:
                     status_short = item.get("fixture", {}).get("status", {}).get("short")
                     is_live = status_short in ["1H", "HT", "2H", "ET", "P"]
@@ -340,10 +351,11 @@ with st.sidebar:
     st.header("⚙️ Setări API")
     input_key = st.text_input("🔑 Introdu Cheia API:", value=st.session_state["api_key"], type="password")
     
-    if st.button("✅ Activează Cheia"):
+    if st.button("✅ Activează & Salvează Cheia"):
         if input_key.strip():
             st.session_state["api_key"] = input_key.strip()
-            st.success("Cheie activată!")
+            save_key_to_file(input_key.strip())
+            st.success("Cheie salvată permanent!")
             st.rerun()
         else:
             st.warning("Introdu o cheie API validă.")
@@ -351,7 +363,7 @@ with st.sidebar:
     season_input = st.number_input("📅 Sezonul curent:", min_value=2023, max_value=2026, value=2026)
 
 if not st.session_state["api_key"]:
-    st.info("👈 Introdu Cheia API în meniul din stânga și apasă pe **Activează Cheia**.")
+    st.info("👈 Introdu Cheia API în meniul din stânga și apasă pe **Activează & Salvează Cheia**.")
 else:
     with st.spinner("🔄 Se descarcă meciurile și se efectuează analizele..."):
         historical_matches, upcoming_matches = fetch_data_api_sports(st.session_state["api_key"], season_input)
