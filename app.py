@@ -1,3 +1,4 @@
+import os
 import math
 import requests
 import numpy as np
@@ -8,14 +9,41 @@ from scipy.stats import poisson
 from datetime import datetime, timezone, timedelta
 
 # ============================================================
-# 1. CONFIGURARE PAGINĂ STREAMLIT
+# 1. CONFIGURARE PAGINĂ & GESTIONARE AUTOMATĂ CHEIE API
 # ============================================================
 
 st.set_page_config(
-    page_title="Quantum Analytics Engine — Correct Score & Value Markets",
+    page_title="Quantum Analytics Engine — Permanent Key Edition",
     page_icon="⚡",
     layout="wide"
 )
+
+SECRETS_DIR = ".streamlit"
+SECRETS_FILE = os.path.join(SECRETS_DIR, "secrets.toml")
+
+def load_saved_api_key():
+    if os.path.exists(SECRETS_FILE):
+        try:
+            with open(SECRETS_FILE, "r") as f:
+                for line in f:
+                    if line.startswith("API_KEY"):
+                        return line.split("=")[1].strip().strip('"').strip("'")
+        except Exception:
+            pass
+    return ""
+
+def save_api_key_permanently(key):
+    try:
+        os.makedirs(SECRETS_DIR, exist_ok=True)
+        with open(SECRETS_FILE, "w") as f:
+            f.write(f'API_KEY = "{key.strip()}"\n')
+        st.session_state["api_key"] = key.strip()
+        st.success("💾 Cheia API a fost salvată permanent!")
+    except Exception as e:
+        st.error(f"Nu s-a putut salva cheia pe disc: {e}")
+
+if "api_key" not in st.session_state:
+    st.session_state["api_key"] = load_saved_api_key()
 
 MAX_GOALS = 10
 DECAY_DAYS = 180
@@ -28,9 +56,6 @@ COMPETITIONS = {
     135: "Serie A",
     78: "Bundesliga"
 }
-
-if "api_key" not in st.session_state:
-    st.session_state["api_key"] = ""
 
 # ============================================================
 # 2. HELPERE ȘI ENGINE MATEMATIC
@@ -126,7 +151,6 @@ def extract_all_markets(matrix):
     p_2 = float(np.sum(np.triu(matrix, 1)))
     p_btts = float(np.sum(matrix[1:, 1:]))
 
-    # Calculare sigură combinată (Solist + GG)
     p_1_gg = float(sum(matrix[h, a] for h in range(1, size) for a in range(1, size) if h > a))
     p_2_gg = float(sum(matrix[h, a] for h in range(1, size) for a in range(1, size) if a > h))
     p_x_gg = float(sum(matrix[i, i] for i in range(1, size)))
@@ -248,16 +272,23 @@ def fetch_data_api_sports(api_key, season_year):
 # 4. INTERFAȚĂ UTILIZATOR
 # ============================================================
 
-st.title("⚡ Quantum Analytics Engine — Correct Score & Value Markets")
+st.title("⚡ Quantum Analytics Engine")
 
-input_key = st.sidebar.text_input("🔑 Cheie API (RapidAPI / API-Sports):", value=st.session_state["api_key"], type="password")
-season_input = st.sidebar.number_input("📅 Sezonul curent (Anul de start):", min_value=2023, max_value=2026, value=2026)
-
-if input_key:
-    st.session_state["api_key"] = input_key
+with st.sidebar:
+    st.header("⚙️ Setări API")
+    input_key = st.text_input("🔑 Cheie API (RapidAPI / API-Sports):", value=st.session_state["api_key"], type="password")
+    
+    if st.button("💾 Salvează Cheia Permanent"):
+        if input_key.strip():
+            save_api_key_permanently(input_key)
+            st.rerun()
+        else:
+            st.warning("Introdu o cheie API validă înainte de salvare.")
+            
+    season_input = st.number_input("📅 Sezonul curent (Anul de start):", min_value=2023, max_value=2026, value=2026)
 
 if not st.session_state["api_key"]:
-    st.info("👈 Introdu Cheia API în bara din stânga.")
+    st.info("👈 Introdu Cheia API în bara din stânga și apasă pe **Salvează Cheia Permanent**.")
 else:
     with st.spinner("🔄 Se descarcă meciurile programate pentru AZI..."):
         historical_matches, upcoming_matches = fetch_data_api_sports(st.session_state["api_key"], season_input)
@@ -310,7 +341,6 @@ else:
                     "odds": opt_odds
                 })
 
-            # Section: Biletul Zilei
             st.markdown("---")
             st.header("🎟️ BILETUL AUTOMAT & PREDICTOR SCORURI")
 
@@ -328,7 +358,6 @@ else:
                     st.metric("Cotă Totală Bilet Optimal", f"{total_odds:.2f}")
                     st.metric("Încredere Medie", f"{avg_conf:.1f}%")
 
-            # Section: Detalii cu Scor Corect per Meci
             st.markdown("---")
             st.header("📊 Analiză Detaliată, Scor Corect & Piețe Extinse")
 
