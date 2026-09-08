@@ -1,4 +1,3 @@
-import os
 import math
 import requests
 import numpy as np
@@ -9,41 +8,25 @@ from scipy.stats import poisson
 from datetime import datetime, timezone, timedelta
 
 # ============================================================
-# 1. CONFIGURARE PAGINĂ & GESTIONARE AUTOMATĂ CHEIE API
+# 1. CONFIGURARE PAGINĂ & GESTIONARE CHEIE API
 # ============================================================
 
 st.set_page_config(
-    page_title="Quantum Analytics Engine — Permanent Key Edition",
+    page_title="Quantum Analytics Engine",
     page_icon="⚡",
     layout="wide"
 )
 
-SECRETS_DIR = ".streamlit"
-SECRETS_FILE = os.path.join(SECRETS_DIR, "secrets.toml")
-
-def load_saved_api_key():
-    if os.path.exists(SECRETS_FILE):
-        try:
-            with open(SECRETS_FILE, "r") as f:
-                for line in f:
-                    if line.startswith("API_KEY"):
-                        return line.split("=")[1].strip().strip('"').strip("'")
-        except Exception:
-            pass
-    return ""
-
-def save_api_key_permanently(key):
-    try:
-        os.makedirs(SECRETS_DIR, exist_ok=True)
-        with open(SECRETS_FILE, "w") as f:
-            f.write(f'API_KEY = "{key.strip()}"\n')
-        st.session_state["api_key"] = key.strip()
-        st.success("💾 Cheia API a fost salvată permanent!")
-    except Exception as e:
-        st.error(f"Nu s-a putut salva cheia pe disc: {e}")
+# Încercăm citirea din Streamlit Secrets dacă există
+saved_key = ""
+try:
+    if "API_KEY" in st.secrets:
+        saved_key = st.secrets["API_KEY"]
+except Exception:
+    pass
 
 if "api_key" not in st.session_state:
-    st.session_state["api_key"] = load_saved_api_key()
+    st.session_state["api_key"] = saved_key
 
 MAX_GOALS = 10
 DECAY_DAYS = 180
@@ -276,27 +259,29 @@ st.title("⚡ Quantum Analytics Engine")
 
 with st.sidebar:
     st.header("⚙️ Setări API")
-    input_key = st.text_input("🔑 Cheie API (RapidAPI / API-Sports):", value=st.session_state["api_key"], type="password")
     
-    if st.button("💾 Salvează Cheia Permanent"):
+    input_key = st.text_input("🔑 Introdu Cheia API:", value=st.session_state["api_key"], type="password")
+    
+    if st.button("✅ Activează Cheia"):
         if input_key.strip():
-            save_api_key_permanently(input_key)
+            st.session_state["api_key"] = input_key.strip()
+            st.success("Cheie activată cu succes!")
             st.rerun()
         else:
-            st.warning("Introdu o cheie API validă înainte de salvare.")
+            st.warning("Introdu o cheie API validă.")
             
-    season_input = st.number_input("📅 Sezonul curent (Anul de start):", min_value=2023, max_value=2026, value=2026)
+    season_input = st.number_input("📅 Sezonul curent:", min_value=2023, max_value=2026, value=2026)
 
 if not st.session_state["api_key"]:
-    st.info("👈 Introdu Cheia API în bara din stânga și apasă pe **Salvează Cheia Permanent**.")
+    st.info("👈 Introdu Cheia API în meniul din stânga și apasă pe **Activează Cheia**.")
 else:
-    with st.spinner("🔄 Se descarcă meciurile programate pentru AZI..."):
+    with st.spinner("🔄 Se descarcă meciurile..."):
         historical_matches, upcoming_matches = fetch_data_api_sports(st.session_state["api_key"], season_input)
 
     db, avg_home, avg_away = build_real_team_database(historical_matches)
     
     if not upcoming_matches:
-        st.error("❌ Nu s-au primit date de la API. Verifică cheia API.")
+        st.error("❌ Nu s-au primit date de la API. Verifică dacă cheia API este corectă.")
     else:
         leagues_found = list(set([m["league"] for m in upcoming_matches]))
         selected_league_filter = st.sidebar.multiselect("Filtrează după competiție:", options=leagues_found, default=[l for l in leagues_found if "Champions League" in l] or leagues_found)
