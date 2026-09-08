@@ -8,11 +8,11 @@ from scipy.stats import poisson
 from datetime import datetime, timezone
 
 # ============================================================
-# 1. CONFIGURARE PAGINĂ
+# 1. CONFIGURARE PAGINĂ & GESTIONARE CHEIE API
 # ============================================================
 
 st.set_page_config(
-    page_title="Quantum Live & Pre-Match Engine",
+    page_title="Quantum Analytics Engine",
     page_icon="⚡",
     layout="wide"
 )
@@ -31,8 +31,11 @@ MAX_GOALS = 10
 DECAY_DAYS = 180
 SHRINKAGE_GAMES = 8
 
+# Lista fixa de Ligi permise (UEFA Champions League, Premier League, La Liga, Serie A, Bundesliga)
+ALLOWED_LEAGUES = [2, 39, 140, 135, 78]
+
 # ============================================================
-# 2. ENGINE MATEMATIC CORECTAT
+# 2. HELPERE ȘI ENGINE MATEMATIC STRICT
 # ============================================================
 
 def clamp(x, low, high):
@@ -58,15 +61,16 @@ def generate_fallback_history_for_team(team_name):
     seed = sum(ord(c) for c in team_name)
     np.random.seed(seed)
     
-    base_gf = np.random.uniform(0.9, 2.1)
-    base_ga = np.random.uniform(0.8, 1.8)
+    base_gf = np.random.uniform(0.8, 2.2)
+    base_ga = np.random.uniform(0.7, 1.9)
     
     history = []
     for i in range(15):
         gf = max(0, int(np.random.poisson(base_gf)))
         ga = max(0, int(np.random.poisson(base_ga)))
+        venue = "home" if i % 2 == 0 else "away"
         history.append({
-            "venue": "home" if i % 2 == 0 else "away",
+            "venue": venue,
             "goals_for": gf,
             "goals_against": ga,
             "weight": 0.8 + (i * 0.01)
@@ -134,7 +138,6 @@ def calculate_expected_goals(home_team, away_team, database, avg_home, avg_away)
     return clamp(l_home, 0.3, 4.2), clamp(l_away, 0.3, 4.2)
 
 def build_dixon_coles_matrix(l_home, l_away, base_h=0, base_a=0):
-    """Construiește matricea adăugând scorul deja existent dacă meciul e LIVE."""
     matrix = np.zeros((MAX_GOALS + 1, MAX_GOALS + 1))
     for rem_h in range(MAX_GOALS + 1 - base_h):
         for rem_a in range(MAX_GOALS + 1 - base_a):
@@ -192,38 +195,78 @@ def get_top_correct_scores(matrix, top_n=5):
     scores = sorted(scores, key=lambda x: x["raw_p"], reverse=True)[:top_n]
     return scores
 
-def get_best_value_pick(markets):
+def get_best_value_pick(markets, top_score):
     """
-    Selectează opțiunea optimă în mod matematic STRICT, fără favoritism.
-    Alege varianta cu cel mai bun raport între Probabilitate și Cotă.
+    Selectează varianta optimală eliminând complet contradicțiile cu scorul principal.
     """
-    candidates = []
+    h_g = top_score["h_goals"]
+    a_g = top_score["a_goals"]
+    total_goals = h_g + a_g
     
+    is_home_win = (h_g > a_g)
+    is_away_win = (a_g > h_g)
+    is_draw = (h_g == a_g)
+    both_scored = (h_g > 0 and a_g > 0)
+
+    candidates = []
+
     for market, prob in markets.items():
         odds = fair_odds(prob)
-        
-        # Filtru: căutăm pariuri de siguranță/valoare
-        if prob >= 0.45 and (1.25 <= odds <= 2.80):
-            # Prioritizăm piețele cu șansă reală de câștig
-            score = prob * (odds ** 0.8)
-            candidates.append((market, prob, odds, score))
-            
+
+        # Incompatibilități Solist vs Scor Corect
+        if is_home_win and market in ["2 (Oaspeți)", "X2 (Șansă Dublă)", "X (Egal)", "2 & GG"]:
+            continue
+        if is_away_win and market in ["1 (Gazde)", "1X (Șansă Dublă)", "X (Egal)", "1 & GG"]:
+            continue
+        if is_draw and market in ["1 (Gazde)", "2 (Oaspeți)", "1 & GG", "2 & GG"]:
+            continue
+
+        # Incompatibilități Goluri vs Total Scor
+        if total_goals <= 2 and "Peste 3.5" in market:
+            continue
+        if total_goals <= 1 and "Peste 2.5" in market:
+            continue
+        if total_goals >= 3 and "Sub 1.5" in market:
+            continue
+        if total_goals >= 4 and "Sub 2.5" in market:
+            continue
+
+        # Incompatibilități GG / NG
+        if both_scored and "NG" in market:
+            continue
+        if not both_scored and market in ["GG (Ambele Marchează)", "1 & GG", "2 & GG"]:
+            continue
+
+        if prob >= 0.40 and (1.25 <= odds <= 2.80):
+            bonus = 1.0
+            if is_home_win and market in ["1X (Șansă Dublă)", "1 (Gazde)"]:
+                bonus = 1.15
+            elif is_away_win and market in ["X2 (Șansă Dublă)", "2 (Oaspeți)"]:
+                bonus = 1.15
+            elif is_draw and market in ["1X (Șansă Dublă)", "X2 (Șansă Dublă)"]:
+                bonus = 1.15
+
+            value_score = prob * (odds ** 1.05) * bonus
+            candidates.append((market, prob, odds, value_score))
+
     if candidates:
         best = max(candidates, key=lambda x: x[3])
         return best[0], best[1], best[2]
-        
-    # Fallback pe cea mai probabilă opțiune de șansă dublă
-    if markets["X2 (Șansă Dublă)"] >= markets["1X (Șansă Dublă)"]:
-        m = "X2 (Șansă Dublă)"
     else:
-        m = "1X (Șansă Dublă)"
-    return m, markets[m], fair_odds(markets[m])
+        if is_home_win:
+            fallback = "1X (Șansă Dublă)"
+        elif is_away_win:
+            fallback = "X2 (Șansă Dublă)"
+        else:
+            fallback = "1X (Șansă Dublă)" if markets["1X (Șansă Dublă)"] >= markets["X2 (Șansă Dublă)"] else "X2 (Șansă Dublă)"
+            
+        return fallback, markets[fallback], fair_odds(markets[fallback])
 
 # ============================================================
-# 3. PRELUARE DATE API (CU SUPORT LIVE)
+# 3. PRELUARE DATE API
 # ============================================================
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300)
 def fetch_data_api_sports(api_key, season_year):
     if not api_key or len(api_key.strip()) < 8:
         return [], []
@@ -242,28 +285,32 @@ def fetch_data_api_sports(api_key, season_year):
         if res.status_code == 200:
             data = res.json().get("response", [])
             for item in data:
-                status_short = item.get("fixture", {}).get("status", {}).get("short")
-                is_live = status_short in ["1H", "HT", "2H", "ET", "P"]
+                league_id = item.get("league", {}).get("id")
                 
-                sh = item.get("goals", {}).get("home") if is_live else 0
-                sa = item.get("goals", {}).get("away") if is_live else 0
-                
-                upcoming.append({
-                    "id": item.get("fixture", {}).get("id"),
-                    "league": item.get("league", {}).get("name", "Competiție"),
-                    "home": item.get("teams", {}).get("home", {}).get("name", "Gazde"),
-                    "away": item.get("teams", {}).get("away", {}).get("name", "Oaspeți"),
-                    "is_live": is_live,
-                    "live_home": sh if sh is not None else 0,
-                    "live_away": sa if sa is not None else 0,
-                    "status": status_short,
-                    "elapsed": item.get("fixture", {}).get("status", {}).get("elapsed", 0),
-                    "date": str(item.get("fixture", {}).get("date", today_str))[:10]
-                })
+                # Filtrăm doar ligile prestabilite
+                if league_id in ALLOWED_LEAGUES:
+                    status_short = item.get("fixture", {}).get("status", {}).get("short")
+                    is_live = status_short in ["1H", "HT", "2H", "ET", "P"]
+                    
+                    sh = item.get("goals", {}).get("home") if is_live else 0
+                    sa = item.get("goals", {}).get("away") if is_live else 0
+
+                    upcoming.append({
+                        "id": item.get("fixture", {}).get("id"),
+                        "league_id": league_id,
+                        "league": item.get("league", {}).get("name", "Competiție"),
+                        "home": item.get("teams", {}).get("home", {}).get("name", "Gazde"),
+                        "away": item.get("teams", {}).get("away", {}).get("name", "Oaspeți"),
+                        "is_live": is_live,
+                        "live_home": sh if sh is not None else 0,
+                        "live_away": sa if sa is not None else 0,
+                        "elapsed": item.get("fixture", {}).get("status", {}).get("elapsed", 0),
+                        "date": str(item.get("fixture", {}).get("date", today_str))[:10]
+                    })
     except Exception:
         pass
 
-    for comp_id in [2, 39, 140, 135, 78]:
+    for comp_id in ALLOWED_LEAGUES:
         try:
             url_hist = f"https://v3.football.api-sports.io/fixtures?league={comp_id}&season={season_year}&last=30"
             res_h = requests.get(url_hist, headers=headers, timeout=8)
@@ -284,54 +331,62 @@ def fetch_data_api_sports(api_key, season_year):
     return historical, upcoming
 
 # ============================================================
-# 4. INTERFAȚĂ
+# 4. INTERFAȚĂ UTILIZATOR
 # ============================================================
 
-st.title("⚡ Quantum Live & Pre-Match Engine")
+st.title("⚡ Quantum Analytics Engine")
 
 with st.sidebar:
-    st.header("⚙️ Setări")
-    input_key = st.text_input("🔑 Cheie API:", value=st.session_state["api_key"], type="password")
-    if st.button("✅ Salvează"):
-        st.session_state["api_key"] = input_key.strip()
-        st.rerun()
-    season_input = st.number_input("📅 Sezon:", min_value=2023, max_value=2026, value=2026)
+    st.header("⚙️ Setări API")
+    input_key = st.text_input("🔑 Introdu Cheia API:", value=st.session_state["api_key"], type="password")
+    
+    if st.button("✅ Activează Cheia"):
+        if input_key.strip():
+            st.session_state["api_key"] = input_key.strip()
+            st.success("Cheie activată!")
+            st.rerun()
+        else:
+            st.warning("Introdu o cheie API validă.")
+            
+    season_input = st.number_input("📅 Sezonul curent:", min_value=2023, max_value=2026, value=2026)
 
 if not st.session_state["api_key"]:
-    st.info("👈 Introdu Cheia API în meniul lateral.")
+    st.info("👈 Introdu Cheia API în meniul din stânga și apasă pe **Activează Cheia**.")
 else:
-    with st.spinner("🔄 Se actualizează datele în timp real..."):
+    with st.spinner("🔄 Se descarcă meciurile și se efectuează analizele..."):
         historical_matches, upcoming_matches = fetch_data_api_sports(st.session_state["api_key"], season_input)
 
     db, avg_home, avg_away = build_real_team_database(historical_matches)
+    
+    with st.sidebar:
+        st.markdown("---")
+        st.write(f"📊 **Meciuri istorice în baza de date:** `{len(historical_matches)}`")
 
     if not upcoming_matches:
-        st.error("❌ Nu s-au găsit meciuri.")
+        st.error("❌ Nu s-au găsit meciuri pentru ligile configurate azi.")
     else:
         match_map = {
             f"{'🔴 LIVE ' + str(m['live_home']) + '-' + str(m['live_away']) + ' ' if m['is_live'] else ''}[{m['league']}] {m['home']} vs {m['away']}": m 
             for m in upcoming_matches
         }
         
-        selected_labels = st.multiselect("Meciuri selectate:", options=list(match_map.keys()), default=list(match_map.keys())[:5])
+        selected_labels = st.multiselect("Meciuri selectate pentru analiză:", options=list(match_map.keys()), default=list(match_map.keys()))
         selected_matches = [match_map[lbl] for lbl in selected_labels]
+        
+        analyzed_matches, ticket_candidates = [], []
 
-        analyzed_matches = []
         for m in selected_matches:
             l_h, l_a = calculate_expected_goals(m["home"], m["away"], db, avg_home, avg_away)
             
-            # Ajustăm xG-ul rămas dacă meciul e LIVE în funcție de minut
             if m["is_live"]:
                 time_remaining = max(5, 90 - (m["elapsed"] or 45)) / 90.0
-                l_h *= time_remaining
-                l_a *= time_remaining
-                matrix = build_dixon_coles_matrix(l_h, l_a, base_h=m["live_home"], base_a=m["live_away"])
+                matrix = build_dixon_coles_matrix(l_h * time_remaining, l_a * time_remaining, base_h=m["live_home"], base_a=m["live_away"])
             else:
                 matrix = build_dixon_coles_matrix(l_h, l_a)
 
             mkts = extract_all_markets(matrix)
-            top_scores = get_top_correct_scores(matrix)
-            opt_m, opt_p, opt_o = get_best_value_pick(mkts)
+            top_scores = get_top_correct_scores(matrix, top_n=5)
+            opt_market, opt_prob, opt_odds = get_best_value_pick(mkts, top_scores[0])
 
             analyzed_matches.append({
                 "match": m,
@@ -339,26 +394,57 @@ else:
                 "l_a": l_a,
                 "markets": mkts,
                 "top_scores": top_scores,
-                "opt_market": opt_m,
-                "opt_prob": opt_p,
-                "opt_odds": opt_o
+                "opt_market": opt_market,
+                "opt_prob": opt_prob,
+                "opt_odds": opt_odds
+            })
+            
+            ticket_candidates.append({
+                "Competiție": m["league"],
+                "Meci": f"{m['home']} vs {m['away']}",
+                "Pariu Value": opt_market,
+                "Scor Cel Mai Probabil": top_scores[0]["Scor Corect"],
+                "Încredere": f"{opt_prob*100:.1f}%",
+                "Cotă Fair": f"{opt_odds:.2f}",
+                "prob": opt_prob,
+                "odds": opt_odds
             })
 
         st.markdown("---")
-        st.header("📊 Analiză Meciuri & Predicții")
+        st.header("🎟️ BILETUL AUTOMAT & PREDICTOR SCORURI")
+
+        if ticket_candidates:
+            top_picks = sorted(ticket_candidates, key=lambda x: x["prob"], reverse=True)[:4]
+            total_odds = float(np.prod([p["odds"] for p in top_picks]))
+            avg_conf = float(np.mean([p["prob"] for p in top_picks])) * 100
+
+            df_t = pd.DataFrame(top_picks).drop(columns=["prob", "odds"])
+
+            c1, c2 = st.columns([3, 1])
+            with c1:
+                st.dataframe(df_t, use_container_width=True)
+            with c2:
+                st.metric("Cotă Totală Bilet Optimal", f"{total_odds:.2f}")
+                st.metric("Încredere Medie", f"{avg_conf:.1f}%")
+
+        st.markdown("---")
+        st.header("📊 Analiză Detaliată Extinsă")
 
         for item in analyzed_matches:
             m = item["match"]
+            l_h, l_a = item["l_h"], item["l_a"]
             mkts = item["markets"]
             top_scores = item["top_scores"]
             opt_m, opt_p, opt_o = item["opt_market"], item["opt_prob"], item["opt_odds"]
-
-            status_tag = f"🔴 LIVE ({m['live_home']}-{m['live_away']}, Min {m['elapsed']}')" if m["is_live"] else "⏳ PRE-MATCH"
             
-            with st.expander(f"{status_tag} [{m['league']}] {m['home']} vs {m['away']}", expanded=True):
+            status_tag = f"🔴 LIVE ({m['live_home']}-{m['live_away']})" if m["is_live"] else "⚽"
+            
+            with st.expander(f"{status_tag} [{m['league']}] {m['home']} vs {m['away']} | xG: {l_h:.2f} - {l_a:.2f}", expanded=True):
+                
                 st.success(f"🔥 **Pariu Optimal Value:** `{opt_m}` | **Probabilitate:** `{opt_p*100:.1f}%` | **Cotă Estimată:** `{opt_o:.2f}`")
-
-                c1, c2, c3 = st.columns(3)
+                
+                c1, c2, c3 = st.columns([1.5, 1.5, 1.5])
+                
                 with c1:
                     st.markdown("**1X2 & Combo**")
                     items_c1 = [k for k in mkts.keys() if "Goluri" not in k]
@@ -370,5 +456,5 @@ else:
                     st.dataframe(pd.DataFrame([{"Piață": k, "Prob.": f"{mkts[k]*100:.1f}%", "Cotă": f"{fair_odds(mkts[k]):.2f}"} for k in items_c2]), use_container_width=True)
 
                 with c3:
-                    st.markdown("**🎯 Top Scoruri Posibile**")
-                    st.dataframe(pd.DataFrame([{"Scor": s["Scor Corect"], "Prob.": s["Probabilitate"], "Cotă": s["Cotă Fair"]} for s in top_scores]), use_container_width=True)
+                    st.markdown("**🎯 Top 5 Scoruri Corecte**")
+                    st.dataframe(pd.DataFrame([{"Scor Corect": s["Scor Corect"], "Probabilitate": s["Probabilitate"], "Cotă Fair": s["Cotă Fair"]} for s in top_scores]), use_container_width=True)
